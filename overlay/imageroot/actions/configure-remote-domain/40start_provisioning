@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+exec 4>&1
+exec 1>&2
+set -e
+
+readarray -t input < <(jq -r '.adminuser, .adminpass')
+
+tmpenv=$(mktemp)
+trap 'rm -f "${tmpenv}"' EXIT
+chmod 0600 "${tmpenv}"
+
+(
+    printf 'JOINADDRESS=%s\n' "${JOINADDRESS:?}"
+    printf 'ADMINCREDS='
+    printf '%s\t%s' "${input[0]:?}" "${input[1]:?}" | base64 --wrap=0
+    printf '\n'
+) > "${tmpenv}"
+
+/usr/bin/podman run \
+    --dns=none \
+    --no-hosts \
+    --network=host \
+    --interactive \
+    --env=REALM \
+    --env=IPADDRESS \
+    --env=PREFIXLEN \
+    --env=NBDOMAIN \
+    --env=SVCPASS \
+    --env=SVCUSER \
+    --env-file="${tmpenv}" \
+    --env=SERVER_ROLE \
+    --env=DNS1ADDRESS \
+    --env=DNS2ADDRESS \
+    --hostname="${HOSTNAME:?}" \
+    --log-driver=none \
+    --rm --name=samba-provisioning \
+    --volume=data:/var/lib/samba:z \
+    --volume=config:/etc/samba:z \
+    --volume=shares:/srv/shares:z \
+    --volume=homes:/srv/homes:z \
+    "${SAMBA_DC_IMAGE:?}" "${PROVISION_TYPE:?}" || exit_code=$?
+
+if [[ ${exit_code:-0} == 33 ]]; then
+    sed -i '/^IPADDRESS=/ d' environment
+    printf 'set-status validation-failed\n' >&"${AGENT_COMFD:-2}"
+    printf 'Provisioning error: invalid credentials\n' >&2
+    jq -n --arg name "${input[0]}" \
+        '[{"field":"adminuser","parameter":"adminuser","value":$name,"error":"invalid_credentials"}]' >&4
+elif [[ ${exit_code:-0} == 34 ]]; then
+    sed -i '/^IPADDRESS=/ d' environment
+    printf 'set-status validation-failed\n' >&"${AGENT_COMFD:-2}"
+    printf 'Provisioning error: insufficient permissions\n' >&2
+    jq -n --arg name "${input[0]}" \
+        '[{"field":"adminuser","parameter":"adminuser","value":$name,"error":"insufficient_permissions"}]' >&4
+fi
+
+exit "${exit_code:-0}"

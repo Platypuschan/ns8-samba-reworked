@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import json
+import os
+import socket
+import sys
+
+import agent
+import dns.exception
+import dns.resolver
+
+
+agent.set_weight(os.path.basename(__file__), 0)
+
+request = json.load(sys.stdin)
+realm = request["realm"].lower()
+hostname = request["hostname"].lower()
+ipaddress = request["ipaddress"]
+joinaddress = request["joinaddress"]
+
+
+def validation_error(field, value, error, message, exit_code):
+    print(message, file=sys.stderr)
+    agent.set_status("validation-failed")
+    json.dump(
+        [
+            {
+                "field": field,
+                "parameter": field,
+                "value": value,
+                "error": error,
+            }
+        ],
+        fp=sys.stdout,
+    )
+    sys.exit(exit_code)
+
+
+if joinaddress == ipaddress:
+    validation_error(
+        "joinaddress",
+        joinaddress,
+        "joinaddress_ip_conflict",
+        "The existing DC address and new DC address must differ.",
+        5,
+    )
+
+resolver = dns.resolver.Resolver(configure=False)
+resolver.nameservers = [joinaddress]
+resolver.timeout = 3
+resolver.lifetime = 6
+
+srv_name = f"_ldap._tcp.dc._msdcs.{realm}"
+try:
+    answer = resolver.resolve(srv_name, "SRV")
+    targets = sorted(str(record.target).rstrip(".") for record in answer)
+    if not targets:
+        raise dns.resolver.NoAnswer
+    print(
+        f"Remote AD DNS {joinaddress} returned {srv_name}: "
+        + ", ".join(targets),
+        file=sys.stderr,
+    )
+except (dns.exception.DNSException, OSError) as exception:
+    validation_error(
+        "joinaddress",
+        joinaddress,
+        "remote_dc_dns_check_failed",
+        f"Remote AD DNS SRV lookup failed: {exception}",
+        6,
+    )
+
+fqdn = f"{hostname}.{realm}"
+for record_type in ("A", "AAAA"):
+    try:
+        hostname_answer = resolver.resolve(fqdn, record_type)
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        continue
+    except (dns.exception.DNSException, OSError) as exception:
+        validation_error(
+            "joinaddress",
+            joinaddress,
+            "remote_dc_dns_check_failed",
+            f"Remote AD DNS hostname lookup failed: {exception}",
+            7,
+        )
+    else:
+        records = ", ".join(str(record) for record in hostname_answer)
+        validation_error(
+            "hostname",
+            hostname,
+            "hostname_check_failed",
+            f"DC hostname {fqdn} is already in DNS ({records}).",
+            8,
+        )
+
+failed_ports = []
+for port in (53, 88, 135, 389, 445):
+    try:
+        with socket.create_connection((joinaddress, port), timeout=3):
+            pass
+    except OSError as exception:
+        failed_ports.append(f"{port} ({exception})")
+
+if failed_ports:
+    validation_error(
+        "joinaddress",
+        joinaddress,
+        "remote_dc_port_check_failed",
+        "Required TCP connections to the existing DC failed: "
+        + ", ".join(failed_ports),
+        9,
+    )

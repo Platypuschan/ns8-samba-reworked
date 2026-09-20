@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import ipaddress
+import json
+import os
+import sys
+
+import agent
+
+
+request = json.load(sys.stdin)
+module_id = os.environ["MODULE_ID"]
+realm = request["realm"].upper()
+domain = realm.lower()
+local_address = ipaddress.ip_address(request["ipaddress"])
+
+agent.set_env("SERVER_ROLE", "dc")
+agent.set_env("PROVISION_TYPE", "join-domain")
+agent.set_env("PROVISION_MODE", "join-remote-domain")
+agent.set_env("REALM", realm)
+agent.set_env("DOMAIN", domain)
+agent.set_env("NBDOMAIN", request["nbdomain"].upper())
+agent.set_env("NBALIAS", request.get("nbalias", ""))
+agent.set_env("HOSTNAME", request["hostname"].lower() + "." + domain)
+agent.set_env("IPADDRESS", request["ipaddress"])
+agent.set_env("JOINADDRESS", request["joinaddress"])
+agent.set_env("SVCUSER", "ldapservice")
+agent.set_env("SVCPASS", request["ldapservice_password"])
+
+with agent.redis_connect() as rdb:
+    cluster_network = ipaddress.ip_network(rdb.get("cluster/network"), strict=False)
+
+with agent.redis_connect(privileged=True) as rdb:
+    if local_address in cluster_network:
+        agent.set_env("PREFIXLEN", str(cluster_network.prefixlen))
+        rdb.srem(f"module/{module_id}/flags", "file_server")
+    else:
+        agent.unset_env("PREFIXLEN")
+        rdb.sadd(f"module/{module_id}/flags", "file_server")

@@ -1,0 +1,159 @@
+name: Track upstream and release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Containerfile
+      - UPSTREAM_VERSION
+      - CUSTOM_VERSION
+      - overlay/**
+      - scripts/**
+      - tests/**
+      - .github/workflows/upstream-release.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ns8-samba-upstream-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          latest_raw=$(gh api repos/NethServer/ns8-samba/releases/latest --jq .tag_name)
+          latest_upstream=${latest_raw#v}
+          current_upstream=$(tr -d '[:space:]' < UPSTREAM_VERSION)
+          current_custom=$(tr -d '[:space:]' < CUSTOM_VERSION)
+
+          version_pattern='^[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ ${latest_upstream} =~ ${version_pattern} ]]
+          [[ ${current_upstream} =~ ${version_pattern} ]]
+          [[ ${current_custom} =~ ${version_pattern} ]]
+
+          upstream_changed=false
+          target_custom=${current_custom}
+          if [[ ${latest_upstream} != "${current_upstream}" ]]; then
+            upstream_changed=true
+            target_custom=$(python3 scripts/next-version.py "${current_custom}")
+          fi
+
+          release_exists=false
+          if gh release view "v${target_custom}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          active=true
+          if [[ ${upstream_changed} == false && ${release_exists} == true ]]; then
+            active=false
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/samba"
+          {
+            printf 'active=%s\n' "${active}"
+            printf 'upstream_changed=%s\n' "${upstream_changed}"
+            printf 'upstream=%s\n' "${latest_upstream}"
+            printf 'custom=%s\n' "${target_custom}"
+            printf 'image=%s\n' "${image}"
+          } >> "${GITHUB_OUTPUT}"
+
+          printf 'Upstream: %s; custom: %s; release required: %s\n' \
+            "${latest_upstream}" "${target_custom}" "${active}"
+
+      - name: Build and test candidate
+        if: steps.target.outputs.active == 'true'
+        run: |
+          ./scripts/test-image.sh \
+            "${{ steps.target.outputs.upstream }}" \
+            ns8-samba-reworked:candidate \
+            "${{ steps.target.outputs.custom }}"
+
+      - name: Record tested versions
+        if: >-
+          steps.target.outputs.active == 'true' &&
+          steps.target.outputs.upstream_changed == 'true'
+        run: |
+          set -euo pipefail
+          printf '%s\n' '${{ steps.target.outputs.upstream }}' > UPSTREAM_VERSION
+          printf '%s\n' '${{ steps.target.outputs.custom }}' > CUSTOM_VERSION
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add UPSTREAM_VERSION CUSTOM_VERSION
+          git commit -m 'chore: update NS8 Samba upstream to ${{ steps.target.outputs.upstream }}'
+          git push origin HEAD:main
+
+      - name: Resolve tested revision
+        if: steps.target.outputs.active == 'true'
+        id: revision
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        if: steps.target.outputs.active == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.target.outputs.active == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish tested module image
+        if: steps.target.outputs.active == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            UPSTREAM_VERSION=${{ steps.target.outputs.upstream }}
+            CUSTOM_VERSION=${{ steps.target.outputs.custom }}
+          tags: |
+            ${{ steps.target.outputs.image }}:${{ steps.target.outputs.custom }}
+            ${{ steps.target.outputs.image }}:upstream-${{ steps.target.outputs.upstream }}
+            ${{ steps.target.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ steps.revision.outputs.sha }}
+            io.github.platypuschan.ns8-samba-reworked.upstream-version=${{ steps.target.outputs.upstream }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Create GitHub release
+        if: steps.target.outputs.active == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='v${{ steps.target.outputs.custom }}'
+          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            git tag -a "${tag}" -m "NS8 Samba reworked ${{ steps.target.outputs.custom }}"
+            git push origin "${tag}"
+          fi
+          if ! gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "NS8 Samba reworked ${{ steps.target.outputs.custom }}" \
+              --notes "Tested CLI remote-join overlay based on NethServer/ns8-samba ${{ steps.target.outputs.upstream }}. Image: ${{ steps.target.outputs.image }}:${{ steps.target.outputs.custom }}"
+          fi
