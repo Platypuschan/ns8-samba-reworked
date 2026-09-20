@@ -146,6 +146,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           tag='v${{ steps.target.outputs.custom }}'
           if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
             git tag -a "${tag}" -m "NS8 Samba reworked ${{ steps.target.outputs.custom }}"
