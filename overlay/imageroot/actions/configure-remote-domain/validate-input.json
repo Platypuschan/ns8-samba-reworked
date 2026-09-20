@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://schema.nethserver.org/samba/configure-remote-domain-input.json",
+  "title": "configure-remote-domain input",
+  "description": "Join a Samba DC in this NS8 cluster to an AD domain hosted by a different NS8 cluster",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adminuser",
+    "adminpass",
+    "realm",
+    "nbdomain",
+    "hostname",
+    "ipaddress",
+    "joinaddress",
+    "ldapservice_password"
+  ],
+  "properties": {
+    "adminuser": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adminpass": {
+      "type": "string",
+      "minLength": 1,
+      "writeOnly": true
+    },
+    "realm": {
+      "type": "string",
+      "description": "Existing AD DNS domain/realm",
+      "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+$",
+      "maxLength": 140
+    },
+    "nbdomain": {
+      "type": "string",
+      "description": "Existing AD NetBIOS domain name",
+      "pattern": "^[a-zA-Z][-a-zA-Z0-9]*$",
+      "minLength": 1,
+      "maxLength": 15
+    },
+    "hostname": {
+      "type": "string",
+      "description": "New DC short host/computer name",
+      "pattern": "^[a-zA-Z][-a-zA-Z0-9]*$",
+      "maxLength": 15
+    },
+    "nbalias": {
+      "type": "string",
+      "description": "Optional NetBIOS alias for file shares",
+      "pattern": "^([a-zA-Z][-a-zA-Z0-9]*)?$",
+      "maxLength": 15
+    },
+    "ipaddress": {
+      "type": "string",
+      "description": "Address to which the new local DC binds",
+      "format": "ipv4"
+    },
+    "joinaddress": {
+      "type": "string",
+      "description": "Direct address of an existing writable DC and DNS server",
+      "format": "ipv4"
+    },
+    "ldapservice_password": {
+      "type": "string",
+      "description": "Existing ldapservice password exported from the source NS8 Samba provider",
+      "minLength": 1,
+      "writeOnly": true
+    }
+  }
+}

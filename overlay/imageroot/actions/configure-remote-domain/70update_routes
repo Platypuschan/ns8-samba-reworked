@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+exec "${AGENT_INSTALL_DIR:?}/actions/configure-module/70update_routes"
