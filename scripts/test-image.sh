@@ -51,7 +51,7 @@ if [[ ${max_per_node} != 1 ]]; then
 fi
 
 entrypoint=$(docker image inspect --format '{{ json .Config.Entrypoint }}' "${image_ref}")
-if [[ ${entrypoint} != '["/"]' ]]; then
+if [[ ${entrypoint} != '["/"]' && ${entrypoint} != '["/bin/sh","-c","/"]' ]]; then
     printf 'Unexpected module entrypoint: %s\n' "${entrypoint}" >&2
     exit 1
 fi
