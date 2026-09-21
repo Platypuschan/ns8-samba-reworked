@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+
+systemctl --user daemon-reload
+
+if [[ ${NTFY_REPLICATION_ENABLED:-0} == 1 ]]; then
+    systemctl --user enable --now ad-replication-monitor.timer
+else
+    systemctl --user disable --now ad-replication-monitor.timer || :
+fi
