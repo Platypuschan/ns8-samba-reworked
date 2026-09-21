@@ -9,6 +9,7 @@ on:
       - UPSTREAM_VERSION
       - CUSTOM_VERSION
       - overlay/**
+      - ui-overlay/**
       - scripts/**
       - tests/**
       - .github/workflows/upstream-release.yml
@@ -157,5 +158,5 @@ jobs:
             gh release create "${tag}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "NS8 Samba reworked ${{ steps.target.outputs.custom }}" \
-              --notes "Tested CLI remote-join overlay based on NethServer/ns8-samba ${{ steps.target.outputs.upstream }}. Image: ${{ steps.target.outputs.image }}:${{ steps.target.outputs.custom }}"
+              --notes "Tested cross-cluster AD DC join UI and replication notification overlay based on NethServer/ns8-samba ${{ steps.target.outputs.upstream }}. Image: ${{ steps.target.outputs.image }}:${{ steps.target.outputs.custom }}"
           fi

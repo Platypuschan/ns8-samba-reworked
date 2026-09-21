@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://schema.nethserver.org/samba/get-replication-monitor-output.json",
+  "title": "AD replication monitor settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "available",
+    "enabled",
+    "base_url",
+    "topic",
+    "failure_threshold",
+    "token_configured"
+  ],
+  "properties": {
+    "available": {
+      "type": "boolean"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "failure_threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "token_configured": {
+      "type": "boolean"
+    }
+  }
+}

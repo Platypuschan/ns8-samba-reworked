@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+import agent
+
+
+TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+STATE_FILE = Path(os.environ["AGENT_STATE_DIR"]) / "ad-replication-monitor-state.json"
+
+
+def validation_error(field, value, error, message, exit_code=2):
+    print(message, file=sys.stderr)
+    agent.set_status("validation-failed")
+    json.dump(
+        [
+            {
+                "field": field,
+                "parameter": field,
+                "value": value,
+                "error": error,
+            }
+        ],
+        fp=sys.stdout,
+    )
+    raise SystemExit(exit_code)
+
+
+def normalize_base_url(value):
+    try:
+        parsed = urlsplit(value.strip())
+        parsed.port
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        validation_error(
+            "base_url",
+            value,
+            "invalid_ntfy_url",
+            "The ntfy server URL must be an HTTP(S) URL without credentials, query, or fragment.",
+        )
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
+    )
+
+
+request = json.load(sys.stdin)
+
+if os.getenv("SERVER_ROLE") != "dc":
+    validation_error(
+        "(root)",
+        "",
+        "not_domain_controller",
+        "AD replication monitoring is available only on a domain controller.",
+    )
+
+enabled = request["enabled"]
+failure_threshold = request["failure_threshold"]
+base_url = request.get("base_url", os.getenv("NTFY_REPLICATION_BASE_URL", ""))
+topic = request.get("topic", os.getenv("NTFY_REPLICATION_TOPIC", ""))
+token = request.get("token", "")
+
+if enabled:
+    base_url = normalize_base_url(base_url)
+    if not TOPIC_PATTERN.fullmatch(topic):
+        validation_error(
+            "topic",
+            topic,
+            "invalid_ntfy_topic",
+            "The ntfy topic must contain 1-64 letters, numbers, underscores, or hyphens.",
+        )
+
+agent.set_env("NTFY_REPLICATION_ENABLED", "1" if enabled else "0")
+agent.set_env("NTFY_REPLICATION_FAILURE_THRESHOLD", str(failure_threshold))
+agent.set_env("NTFY_REPLICATION_BASE_URL", base_url)
+agent.set_env("NTFY_REPLICATION_TOPIC", topic)
+
+if token:
+    agent.set_env("NTFY_REPLICATION_TOKEN", token)
+elif request.get("clear_token") and os.getenv("NTFY_REPLICATION_TOKEN"):
+    agent.unset_env("NTFY_REPLICATION_TOKEN")
+
+subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+if enabled:
+    subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            "ad-replication-monitor.timer",
+        ],
+        check=True,
+    )
+else:
+    subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "disable",
+            "--now",
+            "ad-replication-monitor.timer",
+        ],
+        check=False,
+    )
+    STATE_FILE.unlink(missing_ok=True)

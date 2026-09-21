@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import json
+import os
+import sys
+
+
+def as_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+json.dump(
+    {
+        "available": os.getenv("SERVER_ROLE") == "dc",
+        "enabled": os.getenv("NTFY_REPLICATION_ENABLED", "0") == "1",
+        "base_url": os.getenv("NTFY_REPLICATION_BASE_URL", ""),
+        "topic": os.getenv("NTFY_REPLICATION_TOPIC", ""),
+        "failure_threshold": as_int(
+            os.getenv("NTFY_REPLICATION_FAILURE_THRESHOLD"), 3
+        ),
+        "token_configured": bool(os.getenv("NTFY_REPLICATION_TOKEN")),
+    },
+    fp=sys.stdout,
+)

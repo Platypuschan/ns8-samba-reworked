@@ -1,9 +1,10 @@
 # NS8 Samba reworked
 
-`ns8-samba-reworked` is a thin, CLI-only provisioning overlay for the official
+`ns8-samba-reworked` is a provisioning and monitoring overlay for the official
 NS8 Samba module. It permits an NS8 Samba domain controller on one standalone
 NS8 cluster to join an existing Active Directory domain hosted by a Samba DC
-on another standalone NS8 cluster.
+on another standalone NS8 cluster. The cross-cluster join is available from
+the module web UI and from the API/CLI.
 
 The two NS8 systems remain independent leader nodes. They do **not** form an
 NS8 cluster. Only Active Directory data is replicated by Samba.
@@ -16,8 +17,10 @@ NS8 cluster. Only Active Directory data is replicated by Samba.
 - Added API action: `configure-remote-domain`.
 - LDAP bind identity: the existing `ldapservice` user and password from the
   source NS8 Samba provider.
-- Configuration: CLI only. The inherited web UI is not modified and cannot
-  perform the cross-cluster join.
+- Configuration: the module web UI offers a remote-domain-controller join
+  wizard while preserving the upstream local file-server workflow.
+- Monitoring: optional ntfy notification when a Samba replication connection
+  reaches a configured number of consecutive failures.
 - Releases: GitHub Actions checks the latest stable upstream release daily,
   tests a candidate image, and publishes a new custom package only after the
   tests pass.
@@ -41,8 +44,8 @@ Before installing, verify from the new NS8 host that the existing DC answers
 authoritative AD DNS directly:
 
 ```bash
-dig @10.5.0.2 _ldap._tcp.dc._msdcs.ad.own-hub.de SRV +short
-dig @10.5.0.2 dc1.ad.own-hub.de A +short
+dig @198.51.100.2 _ldap._tcp.dc._msdcs.ad.example.com SRV +short
+dig @198.51.100.2 dc1.ad.example.com A +short
 ```
 
 ## Install the pinned module image
@@ -52,7 +55,7 @@ production; do not deploy `latest` to a domain controller.
 
 ```bash
 api-cli run add-internal-provider --data '{
-  "image": "ghcr.io/platypuschan/samba:1.0.0",
+  "image": "ghcr.io/platypuschan/samba:1.1.0",
   "node": 1
 }'
 ```
@@ -68,7 +71,7 @@ settings before installing it on NS8.
 The destination provider must advertise the same `ldapservice` password as
 the existing provider. Do not create or reset that account.
 
-On the existing Netcup leader, export only the required non-interactive
+On the existing remote NS8 leader, export only the required non-interactive
 provider values to a root-only file:
 
 ```bash
@@ -88,9 +91,25 @@ Transfer that file through an encrypted, authenticated channel to the new
 leader as `/root/ns8-samba-remote-source.json`, still mode `0600`. Delete both
 copies after the join succeeds.
 
+## Join from the web UI
+
+Open the newly installed Samba instance in the NS8 application view. In the
+first-configuration wizard select **Join a remote AD domain as a domain
+controller**, then enter:
+
+- the AD DNS domain/realm and NetBIOS domain name;
+- the directly reachable IP address of an existing writable DC;
+- the existing provider's `ldapservice` password;
+- Domain Admin credentials for the join; and
+- the new DC host name and local IP address.
+
+The UI calls the same validated `configure-remote-domain` action documented
+below. Secrets are sent in the task payload and are never returned by a read
+action.
+
 ## Join the remote AD domain
 
-On the new Home leader, run the action. Secrets are sent on standard input,
+On the new local NS8 leader, run the action. Secrets are sent on standard input,
 not exposed in process arguments or shell history:
 
 ```bash
@@ -100,10 +119,10 @@ echo
 jq -n \
   --slurpfile source /root/ns8-samba-remote-source.json \
   --arg adminpass "$AD_ADMIN_PASSWORD" \
-  --arg realm 'ad.own-hub.de' \
-  --arg hostname 'DC-HOME' \
-  --arg ipaddress '192.168.178.12' \
-  --arg joinaddress '10.5.0.2' \
+  --arg realm 'ad.example.com' \
+  --arg hostname 'DC-LOCAL' \
+  --arg ipaddress '192.0.2.12' \
+  --arg joinaddress '198.51.100.2' \
   '{
     adminuser: "Administrator",
     adminpass: $adminpass,
@@ -141,15 +160,32 @@ runagent -m samba1 podman exec samba-dc samba-tool drs showrepl
 runagent -m samba1 podman exec samba-dc samba-tool fsmo show
 ```
 
-On the new Home leader also verify the local NS8 provider registration:
+On the new local NS8 leader also verify the local NS8 provider registration:
 
 ```bash
 api-cli run list-user-domains |
-jq '.domains[] | select(.name == "ad.own-hub.de")'
+jq '.domains[] | select(.name == "ad.example.com")'
 ```
 
 Operational checks and removal precautions are in
 [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+## ntfy replication notifications
+
+After the DC is configured, open **Settings** and enable **AD replication
+notifications**. Configure the ntfy server base URL, topic, an optional access
+token, and the number of consecutive failures that must be reached before a
+notification is sent.
+
+The monitor runs every five minutes and reads `samba-tool drs showrepl --json`.
+The threshold is applied to Samba's own `consecutive failures` value for every
+non-deleted inbound and outbound replication connection. One message is sent
+per active incident; successful replication resets the incident so a later
+failure can notify again. A failure to execute the health check itself uses
+the same threshold and produces a distinct warning.
+
+The access token is write-only in the UI/API: the read action reports only
+whether a token is configured.
 
 ## Development
 
@@ -175,14 +211,17 @@ with the upstream action layout.
 It queries the latest non-prerelease GitHub release of
 `NethServer/ns8-samba`. When the upstream version changes it:
 
-1. builds the overlay on that exact upstream module image;
-2. runs the source and image compatibility tests;
-3. updates `UPSTREAM_VERSION` and increments the custom minor version;
-4. pushes the tested image to `ghcr.io/platypuschan/samba`;
-5. creates a matching Git tag and GitHub release.
+1. downloads the matching upstream UI source and builds the customized UI;
+2. builds the overlay on that exact upstream module image;
+3. runs the source and image compatibility tests;
+4. updates `UPSTREAM_VERSION` and increments the custom minor version;
+5. pushes the tested image to `ghcr.io/platypuschan/samba`;
+6. creates a matching Git tag and GitHub release.
 
 If testing fails, neither version files nor packages are released. Upstream
 changes that break one of the reused action steps therefore stop at CI.
+The UI patch also uses explicit source anchors; an incompatible upstream UI
+change fails the candidate build instead of silently dropping custom fields.
 
 ## License
 
