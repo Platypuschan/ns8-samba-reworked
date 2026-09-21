@@ -10,7 +10,7 @@ runagent -m samba1 podman exec samba-dc samba-tool dbcheck --cross-ncs
 runagent -m samba1 podman exec samba-dc samba-tool fsmo show
 
 dig @192.0.2.12 _ldap._tcp.dc._msdcs.ad.example.com SRV +short
-dig @10.5.0.2 _ldap._tcp.dc._msdcs.ad.example.com SRV +short
+dig @198.51.100.2 _ldap._tcp.dc._msdcs.ad.example.com SRV +short
 ```
 
 Expected results:
@@ -40,6 +40,30 @@ because `latest` changed.
 
 After every update, repeat `drs showrepl`, `dbcheck --cross-ncs`, DNS SRV, LDAP,
 and Kerberos checks.
+
+## Replication notification monitor
+
+The optional monitor is configured on the module **Settings** page. Its timer
+and most recent run can be inspected on the node that hosts the Samba module:
+
+```bash
+runagent -m samba1 systemctl --user status ad-replication-monitor.timer
+runagent -m samba1 systemctl --user status ad-replication-monitor.service
+runagent -m samba1 journalctl --user-unit ad-replication-monitor.service --since today
+```
+
+Run an immediate check without waiting for the five-minute timer:
+
+```bash
+runagent -m samba1 check-ad-replication
+```
+
+The monitor sends one alert for a stable set of failing replication
+connections. It clears that incident latch after all connections are below the
+configured threshold. The state file is
+`state/ad-replication-monitor-state.json`; disabling notifications removes it.
+The ntfy token is stored in the module environment and is never emitted by the
+`get-replication-monitor` action.
 
 ## Removal
 

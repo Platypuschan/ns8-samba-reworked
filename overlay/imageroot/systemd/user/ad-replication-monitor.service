@@ -1,0 +1,9 @@
+[Unit]
+Description=Check Samba AD replication and send ntfy alerts
+After=samba-dc.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%E/state/environment
+WorkingDirectory=%E/state
+ExecStart=runagent check-ad-replication

@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://schema.nethserver.org/samba/set-replication-monitor-input.json",
+  "title": "Configure AD replication ntfy notifications",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "enabled",
+    "failure_threshold"
+  ],
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "base_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "topic": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "failure_threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "token": {
+      "type": "string",
+      "maxLength": 4096,
+      "writeOnly": true
+    },
+    "clear_token": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "base_url",
+          "topic"
+        ]
+      }
+    }
+  ]
+}

@@ -11,4 +11,6 @@ with agent.redis_connect(privileged=True) as rdb:
     rdb.sadd(
         os.environ["AGENT_ID"] + "/roles/selfadm",
         "configure-remote-domain",
+        "get-replication-monitor",
+        "set-replication-monitor",
     )

@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically check Samba AD replication
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=ad-replication-monitor.service
+
+[Install]
+WantedBy=timers.target

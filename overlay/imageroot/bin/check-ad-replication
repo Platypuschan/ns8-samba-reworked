@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+
+STATE_FILE = Path(os.environ["AGENT_STATE_DIR"]) / "ad-replication-monitor-state.json"
+
+
+def load_state():
+    try:
+        with STATE_FILE.open(encoding="utf-8") as state_file:
+            state = json.load(state_file)
+            return state if isinstance(state, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=STATE_FILE.parent,
+        prefix=STATE_FILE.name + ".",
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as state_file:
+            json.dump(state, state_file, sort_keys=True)
+            state_file.write("\n")
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, STATE_FILE)
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+
+
+def send_ntfy(title, message):
+    base_url = os.environ["NTFY_REPLICATION_BASE_URL"].rstrip("/")
+    topic = quote(os.environ["NTFY_REPLICATION_TOPIC"], safe="")
+    headers = {
+        "Title": title,
+        "Priority": "high",
+        "Tags": "warning,repeat",
+        "User-Agent": "ns8-samba-reworked-replication-monitor/1",
+    }
+    token = os.getenv("NTFY_REPLICATION_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+
+    request = Request(
+        f"{base_url}/{topic}",
+        data=message.encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=15) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"ntfy returned HTTP {response.status}")
+
+
+def notify_once(state, incident_key, title, message):
+    if state.get("active_incident") == incident_key:
+        return
+    send_ntfy(title, message)
+    state["active_incident"] = incident_key
+
+
+def handle_probe_failure(state, threshold, error):
+    probe_failures = int(state.get("probe_failures", 0)) + 1
+    state["probe_failures"] = probe_failures
+    if probe_failures >= threshold:
+        hostname = os.getenv("HOSTNAME", os.getenv("MODULE_ID", "Samba DC"))
+        try:
+            notify_once(
+                state,
+                "replication-probe-failed",
+                f"AD replication check failed on {hostname}",
+                (
+                    f"The AD replication status check failed {probe_failures} "
+                    f"consecutive times.\n\n{error}"
+                ),
+            )
+        except Exception as exception:
+            print(f"Unable to send ntfy notification: {exception}", file=sys.stderr)
+            save_state(state)
+            return False
+    save_state(state)
+    return True
+
+
+def replication_failures(payload, threshold):
+    failures = []
+    for direction, key in (("inbound", "repsFrom"), ("outbound", "repsTo")):
+        for replication in payload.get(key, []):
+            if replication.get("is deleted"):
+                continue
+            count = int(replication.get("consecutive failures", 0))
+            if count < threshold:
+                continue
+            failures.append(
+                {
+                    "direction": direction,
+                    "naming_context": replication.get("NC dn", "unknown"),
+                    "dsa": replication.get(
+                        "DSA", replication.get("DSA objectGUID", "unknown")
+                    ),
+                    "count": count,
+                    "last_attempt": replication.get("last attempt time", "unknown"),
+                    "message": replication.get("last attempt message", "unknown"),
+                }
+            )
+    return failures
+
+
+def format_failure_message(failures, threshold):
+    lines = [
+        f"At least one AD replication connection reached the configured threshold of {threshold} consecutive failures.",
+        "",
+    ]
+    for failure in failures[:8]:
+        lines.extend(
+            [
+                f"{failure['direction']}: {failure['dsa']}",
+                f"Naming context: {failure['naming_context']}",
+                f"Consecutive failures: {failure['count']}",
+                f"Last attempt: {failure['last_attempt']} — {failure['message']}",
+                "",
+            ]
+        )
+    if len(failures) > 8:
+        lines.append(f"... and {len(failures) - 8} more failing connections")
+    return "\n".join(lines).strip()
+
+
+def main():
+    if (
+        os.getenv("SERVER_ROLE") != "dc"
+        or os.getenv("NTFY_REPLICATION_ENABLED") != "1"
+    ):
+        return 0
+
+    threshold = int(os.getenv("NTFY_REPLICATION_FAILURE_THRESHOLD", "3"))
+    state = load_state()
+
+    try:
+        result = subprocess.run(
+            [
+                "podman",
+                "exec",
+                "samba-dc",
+                "samba-tool",
+                "drs",
+                "showrepl",
+                "--json",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode:
+            error = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"samba-tool drs showrepl exited with {result.returncode}: {error}"
+            )
+        payload = json.loads(result.stdout)
+        failures = replication_failures(payload, threshold)
+    except (
+        AttributeError,
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        subprocess.TimeoutExpired,
+        TypeError,
+        ValueError,
+    ) as exception:
+        print(f"AD replication status check failed: {exception}", file=sys.stderr)
+        return 0 if handle_probe_failure(state, threshold, str(exception)) else 1
+
+    if not failures:
+        save_state({"probe_failures": 0})
+        return 0
+
+    incident_parts = sorted(
+        f"{failure['direction']}|{failure['dsa']}|{failure['naming_context']}"
+        for failure in failures
+    )
+    incident_key = hashlib.sha256("\n".join(incident_parts).encode()).hexdigest()
+    hostname = os.getenv("HOSTNAME", os.getenv("MODULE_ID", "Samba DC"))
+    try:
+        notify_once(
+            state,
+            incident_key,
+            f"AD replication failed on {hostname}",
+            format_failure_message(failures, threshold),
+        )
+    except Exception as exception:
+        print(f"Unable to send ntfy notification: {exception}", file=sys.stderr)
+        save_state({"probe_failures": 0})
+        return 1
+
+    state["probe_failures"] = 0
+    save_state(state)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
