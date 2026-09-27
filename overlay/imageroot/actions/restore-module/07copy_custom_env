@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import json
+import sys
+
+import agent
+
+
+environment = json.load(sys.stdin)["environment"]
+for key in (
+    "PROVISION_MODE",
+    "JOINADDRESS",
+    "NTFY_REPLICATION_ENABLED",
+    "NTFY_REPLICATION_FAILURE_THRESHOLD",
+    "NTFY_REPLICATION_BASE_URL",
+    "NTFY_REPLICATION_TOPIC",
+    "NTFY_REPLICATION_TOKEN",
+):
+    if key in environment:
+        agent.set_env(key, environment[key])

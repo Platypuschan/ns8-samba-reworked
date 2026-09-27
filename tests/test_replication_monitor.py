@@ -120,6 +120,47 @@ class ReplicationMonitorTests(unittest.TestCase):
             self.assertEqual(self.monitor.main(), 0)
             send_ntfy.assert_called_once()
 
+    def test_probe_failure_does_not_reset_replication_alert(self):
+        failing = self.command_result(self.replication_payload(2))
+        failed_probe = self.command_result(returncode=1, stderr="container down")
+        with mock.patch.object(self.monitor.subprocess, "run", return_value=failing), mock.patch.object(
+            self.monitor, "send_ntfy"
+        ) as send_ntfy:
+            self.assertEqual(self.monitor.main(), 0)
+            self.monitor.subprocess.run.return_value = failed_probe
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(self.monitor.main(), 0)
+            self.monitor.subprocess.run.return_value = failing
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(send_ntfy.call_count, 2)
+            self.assertEqual(len(self.monitor.load_state()["active_replication"]), 1)
+
+    def test_alerts_each_connection_only_once_until_success(self):
+        first = self.replication_payload(2)
+        second = json.loads(json.dumps(first))
+        second["repsFrom"].append({
+            **first["repsFrom"][0],
+            "NC dn": "CN=Configuration,DC=ad,DC=example,DC=com",
+        })
+        below_threshold = json.loads(json.dumps(second))
+        below_threshold["repsFrom"][0]["consecutive failures"] = 1
+        recovered = json.loads(json.dumps(second))
+        recovered["repsFrom"][0]["consecutive failures"] = 0
+
+        with mock.patch.object(self.monitor.subprocess, "run"), mock.patch.object(
+            self.monitor, "send_ntfy"
+        ) as send_ntfy:
+            for payload in (first, second, first, below_threshold, second):
+                self.monitor.subprocess.run.return_value = self.command_result(payload)
+                self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(send_ntfy.call_count, 2)
+
+            self.monitor.subprocess.run.return_value = self.command_result(recovered)
+            self.assertEqual(self.monitor.main(), 0)
+            self.monitor.subprocess.run.return_value = self.command_result(second)
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(send_ntfy.call_count, 3)
+
     def test_ntfy_request_uses_topic_and_bearer_token(self):
         response = mock.MagicMock()
         response.status = 200

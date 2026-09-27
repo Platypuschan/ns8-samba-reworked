@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
+import ipaddress
 import os
 import socket
 import sys
@@ -17,7 +18,7 @@ agent.set_weight(os.path.basename(__file__), 0)
 request = json.load(sys.stdin)
 realm = request["realm"].lower()
 hostname = request["hostname"].lower()
-ipaddress = request["ipaddress"]
+local_ip = request["ipaddress"]
 joinaddress = request["joinaddress"]
 
 
@@ -38,13 +39,25 @@ def validation_error(field, value, error, message, exit_code):
     sys.exit(exit_code)
 
 
-if joinaddress == ipaddress:
+if joinaddress == local_ip:
     validation_error(
         "joinaddress",
         joinaddress,
         "joinaddress_ip_conflict",
         "The existing DC address and new DC address must differ.",
         5,
+    )
+
+with agent.redis_connect() as rdb:
+    cluster_network = ipaddress.ip_network(rdb.get("cluster/network"), strict=False)
+
+if ipaddress.ip_address(local_ip) in cluster_network:
+    validation_error(
+        "ipaddress",
+        local_ip,
+        "dc_vpn_address_forbidden",
+        "A remote-joined DC needs a directly reachable address outside the NS8 cluster VPN.",
+        10,
     )
 
 resolver = dns.resolver.Resolver(configure=False)
