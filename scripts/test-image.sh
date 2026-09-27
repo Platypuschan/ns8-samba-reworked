@@ -8,6 +8,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 upstream_version=${1:-$(tr -d '[:space:]' < "${repo_root}/UPSTREAM_VERSION")}
 image_ref=${2:-ns8-samba-reworked:test}
 custom_version=${3:-$(tr -d '[:space:]' < "${repo_root}/CUSTOM_VERSION")}
+source_revision=${4:-}
 rootfs=$(mktemp -d)
 container_id=
 
@@ -21,10 +22,17 @@ trap cleanup EXIT
 
 "${repo_root}/scripts/test-source.sh"
 
+build_args=(
+    --pull
+    --build-arg "UPSTREAM_VERSION=${upstream_version}"
+    --build-arg "CUSTOM_VERSION=${custom_version}"
+)
+if [[ -n ${source_revision} ]]; then
+    build_args+=(--label "org.opencontainers.image.revision=${source_revision}")
+fi
+
 docker build \
-    --pull \
-    --build-arg "UPSTREAM_VERSION=${upstream_version}" \
-    --build-arg "CUSTOM_VERSION=${custom_version}" \
+    "${build_args[@]}" \
     --tag "${image_ref}" \
     --file "${repo_root}/Containerfile" \
     "${repo_root}"

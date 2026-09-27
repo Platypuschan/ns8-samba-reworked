@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+exec "${AGENT_INSTALL_DIR:?}/update-module.d/55replication_monitor"

@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# Based on NethServer/ns8-samba 3.5.0 samba-dc/usr/local/sbin/join-domain.
+# Copyright (C) 2022 Nethesis S.r.l.
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+set -e
+
+echo "Join ${HOSTNAME} as ${REALM} domain controller"
+
+cat - > /etc/resolv.conf <<EOF
+search ${REALM,,}
+nameserver ${JOINADDRESS:?}
+EOF
+
+rm -f /etc/samba/smb.conf
+IFS=$'\t' read -r adminuser adminpass < <(echo -n "${ADMINCREDS}" | base64 -d ; echo)
+kinit "${adminuser}" <<<"${adminpass}" || exit 33
+tmpout=$(mktemp)
+trap 'kdestroy ; rm -f "${tmpout}"' EXIT
+
+samba-tool domain join "${REALM,,}" DC \
+    --use-kerberos=required \
+    "--option=bind interfaces only = yes" \
+    ${PREFIXLEN:+"--option=disable netbios = yes"} \
+    "--option=interfaces = 127.0.0.1 ${IPADDRESS}${PREFIXLEN:+/}${PREFIXLEN}" \
+    "--option=acl_xattr:security_acl_name = user.NTACL" \
+    "--option=include = /etc/samba/include.conf" 2>&1 | tee "${tmpout}"
+exit_code=${PIPESTATUS[0]}
+
+if [[ ${exit_code} != 0 ]] && grep -q "LDAP_INSUFFICIENT_ACCESS_RIGHTS" "${tmpout}"; then
+    exit 34
+fi
+exit "${exit_code}"

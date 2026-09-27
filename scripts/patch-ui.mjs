@@ -76,6 +76,8 @@ const translations = {
         "This domain is already registered in the local NS8 cluster.",
       joinaddress_ip_conflict:
         "The existing and new domain controller IP addresses must differ.",
+      dc_vpn_address_forbidden:
+        "Select a directly reachable DC address outside the NS8 cluster VPN range.",
       remote_dc_dns_check_failed:
         "The existing domain controller did not answer the required AD DNS lookup.",
       hostname_check_failed:
@@ -150,6 +152,8 @@ const translations = {
         "Diese Domäne ist bereits im lokalen NS8-Cluster registriert.",
       joinaddress_ip_conflict:
         "Die IP-Adressen des vorhandenen und des neuen Domänencontrollers müssen unterschiedlich sein.",
+      dc_vpn_address_forbidden:
+        "Wähle eine direkt erreichbare DC-Adresse außerhalb des NS8-Cluster-VPNs.",
       remote_dc_dns_check_failed:
         "Der vorhandene Domänencontroller hat die erforderliche AD-DNS-Abfrage nicht beantwortet.",
       hostname_check_failed:
