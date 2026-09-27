@@ -85,14 +85,14 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 10)
         self.assertEqual(json.loads(output.getvalue())[0]["error"], "dc_vpn_address_forbidden")
 
-    def test_false_success_from_upstream_join_does_not_start_dc(self):
+    def test_failed_or_incomplete_join_does_not_start_dc(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             fake_podman = work / "podman"
             fake_podman.write_text(
                 "#!/bin/bash\n"
                 "if [[ $* == *--entrypoint=/bin/bash* ]]; then\n"
-                "  echo '{\"repsFrom\":[]}'\n"
+                "  exit 1\n"
                 "fi\n"
                 "exit 0\n"
             )
@@ -102,6 +102,7 @@ class RemoteLifecycleTests(unittest.TestCase):
             environment = {
                 **os.environ,
                 "PODMAN_BIN": str(fake_podman),
+                "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot"),
                 "JOINADDRESS": "192.0.2.3",
                 "SAMBA_DC_IMAGE": "samba:test",
                 "PROVISION_TYPE": "join-domain",
@@ -121,9 +122,6 @@ class RemoteLifecycleTests(unittest.TestCase):
 
             fake_podman.write_text(
                 "#!/bin/bash\n"
-                "if [[ $* == *--entrypoint=/bin/bash* ]]; then\n"
-                "  echo '{\"repsFrom\":[{\"consecutive failures\":0}]}'\n"
-                "fi\n"
                 "exit 0\n"
             )
             environment_file.write_text("IPADDRESS=192.0.2.4\nREALM=AD.EXAMPLE.ORG\n")

@@ -6,6 +6,7 @@ exec 4>&1
 exec 1>&2
 set -euo pipefail
 podman_bin=${PODMAN_BIN:-/usr/bin/podman}
+[[ ${PROVISION_TYPE:?} == join-domain ]]
 
 readarray -t input < <(jq -r '.adminuser, .adminpass')
 
@@ -42,11 +43,11 @@ chmod 0600 "${tmpenv}"
     --volume=config:/etc/samba:z \
     --volume=shares:/srv/shares:z \
     --volume=homes:/srv/homes:z \
-    "${SAMBA_DC_IMAGE:?}" "${PROVISION_TYPE:?}" || exit_code=$?
+    --volume="${AGENT_INSTALL_DIR:?}/bin/join-domain-checked:/run/join-domain-checked:ro,z" \
+    "${SAMBA_DC_IMAGE:?}" /run/join-domain-checked || exit_code=$?
 
-# The upstream join-domain script can return zero after a failed samba-tool
-# domain join because it loses exit_code across a pipeline. Check the actual
-# local DRS database before any service or LDAP advertisement is started.
+# Run the corrected join script in the official image. Before starting or
+# advertising the DC, also confirm that the join created its local AD database.
 if [[ ${exit_code:-0} == 0 ]]; then
     if ! "${podman_bin}" run \
         --network=host \
@@ -56,9 +57,8 @@ if [[ ${exit_code:-0} == 0 ]]; then
         --volume=data:/var/lib/samba:z \
         --volume=config:/etc/samba:z \
         "${SAMBA_DC_IMAGE:?}" -c \
-        'test -s /var/lib/samba/private/sam.ldb && samba-tool drs showrepl --json' \
-        | jq -e '(.repsFrom // []) as $neighbors | ($neighbors | length > 0) and all($neighbors[]; .["consecutive failures"] == 0)' >/dev/null; then
-        printf 'Provisioning failed: local AD database or successful DRS neighbor missing. Check the remote DC for a stale computer account before retrying.\n' >&2
+        'test -s /var/lib/samba/private/sam.ldb'; then
+        printf 'Provisioning failed: local AD database missing. Check the remote DC for a stale computer account before retrying.\n' >&2
         exit_code=1
     fi
 fi

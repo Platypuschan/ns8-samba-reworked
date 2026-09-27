@@ -73,6 +73,11 @@ fresh Samba module, joining the surviving domain, and checking replication in
 both directions. Check the surviving DC for a stale computer account if an
 earlier join failed. Never restore a second, independent copy of a live domain.
 
+During provisioning the module bind-mounts a corrected copy of the upstream
+`join-domain` script into the official Samba runtime image. This preserves
+the actual `samba-tool domain join` exit code before the DC is started. After
+installation, check both inbound and outbound replication on the running DC.
+
 ## Removal
 
 Do not delete the VM or NS8 module first. Demote a reachable DC normally. If it

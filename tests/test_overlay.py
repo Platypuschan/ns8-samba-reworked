@@ -93,6 +93,7 @@ for executable in (
     get_monitor / "50read",
     set_monitor / "50set",
     monitor_bin,
+    repository / "overlay/imageroot/bin/join-domain-checked",
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
@@ -138,7 +139,9 @@ assert "secrets" not in set_env
 provision = (action / "40start_provisioning").read_text()
 assert '"${JOINADDRESS:?}"' in provision
 assert "print-joinaddress" not in provision
-assert '"${SAMBA_DC_IMAGE:?}" "${PROVISION_TYPE:?}"' in provision
+assert '"${SAMBA_DC_IMAGE:?}" /run/join-domain-checked' in provision
+join_script = (repository / "overlay/imageroot/bin/join-domain-checked").read_text()
+assert "exit_code=${PIPESTATUS[0]}" in join_script
 
 remote_validation = (action / "03validate_remote").read_text()
 for port in (53, 88, 135, 389, 445):
@@ -205,6 +208,7 @@ assert "COPY overlay/ /" in containerfile
 assert "FROM docker.io/library/node:24-slim AS ui-builder" in containerfile
 assert "scripts/patch-ui.mjs" in containerfile
 assert "sha256sum --check /tmp/upstream-wizard.sha256" in containerfile
+assert "sha256sum --check /tmp/upstream-join-domain.sha256" in containerfile
 assert "COPY --from=ui-builder /usr/src/ui/dist/ /ui/" in containerfile
 
 first_configuration = (
@@ -242,6 +246,7 @@ if image_root is not None:
     assert (
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
+    assert (image_root / "imageroot/bin/join-domain-checked").is_file()
     for filename in ("04reject_remote_domain", "07copy_custom_env", "85replication_monitor"):
         assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
     assert (

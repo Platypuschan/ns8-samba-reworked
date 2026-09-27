@@ -13,7 +13,8 @@ NS8 cluster. Only Active Directory data is replicated by Samba.
 
 - Base image: `ghcr.io/nethserver/samba`, pinned by `UPSTREAM_VERSION`.
 - Runtime: the unmodified official `samba-dc` image selected by the base
-  module's `org.nethserver.images` label.
+  module's `org.nethserver.images` label. Provisioning bind-mounts a corrected
+  copy of its `join-domain` script to preserve the actual Samba exit status.
 - Added API action: `configure-remote-domain`.
 - LDAP bind identity: the existing `ldapservice` user and password from the
   source NS8 Samba provider.
@@ -206,8 +207,8 @@ Build and validate the complete derived image with Docker:
 `test-image.sh` verifies the overlay, inherited module labels, expected
 official `samba-dc` runtime tag, executable action steps, and compatibility
 with the upstream action layout. The wizard hash in
-`scripts/upstream-wizard.sha256` must be reviewed and updated when upstream
-changes its first-configuration wizard, which the overlay replaces.
+`scripts/upstream-wizard.sha256` and `scripts/upstream-join-domain.sha256`
+must be reviewed and updated if upstream changes either replaced file.
 
 ## Release model
 
@@ -228,9 +229,9 @@ workflow then:
 
 If testing fails, neither version files nor packages are released. Upstream
 changes that break one of the reused action steps therefore stop at CI.
-The settings UI patch uses explicit source anchors. A SHA-256 check protects
-the replaced setup wizard from silent upstream changes. A changed wizard
-requires review and a deliberate hash update before a candidate can build.
+The settings UI patch uses explicit source anchors. SHA-256 checks protect
+the replaced setup wizard and join script from silent upstream changes. Either
+change requires review and a deliberate hash update before a candidate builds.
 
 ## Restore of a remote DC
 

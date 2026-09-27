@@ -10,10 +10,14 @@ RUN apt-get update \
 
 WORKDIR /usr/src
 
+COPY scripts/upstream-join-domain.sha256 /tmp/upstream-join-domain.sha256
 RUN curl --fail --location --retry 3 \
         "https://github.com/NethServer/ns8-samba/archive/refs/tags/${UPSTREAM_VERSION}.tar.gz" \
         --output upstream.tar.gz \
     && tar --extract --gzip --file upstream.tar.gz \
+    && cd "ns8-samba-${UPSTREAM_VERSION}" \
+    && sha256sum --check /tmp/upstream-join-domain.sha256 \
+    && cd /usr/src \
     && mv "ns8-samba-${UPSTREAM_VERSION}/ui" /usr/src/ui \
     && rm -rf upstream.tar.gz "ns8-samba-${UPSTREAM_VERSION}"
 
