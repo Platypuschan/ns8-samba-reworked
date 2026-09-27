@@ -17,6 +17,11 @@ RUN curl --fail --location --retry 3 \
     && mv "ns8-samba-${UPSTREAM_VERSION}/ui" /usr/src/ui \
     && rm -rf upstream.tar.gz "ns8-samba-${UPSTREAM_VERSION}"
 
+# This wizard is replaced by the overlay. Refuse an upstream revision until
+# its original wizard has been reviewed against the replacement.
+COPY scripts/upstream-wizard.sha256 /tmp/upstream-wizard.sha256
+RUN cd /usr/src/ui && sha256sum --check /tmp/upstream-wizard.sha256
+
 COPY ui-overlay/ /usr/src/ui/
 COPY scripts/patch-ui.mjs /tmp/patch-ui.mjs
 

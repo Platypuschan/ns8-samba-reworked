@@ -143,6 +143,7 @@ The action validates that:
 
 - the realm is not already registered in the destination NS8 cluster;
 - the requested local DC address is available for Samba;
+- the new DC address is outside the NS8 cluster VPN range;
 - the remote DC answers the AD LDAP SRV query directly;
 - the new DC hostname is not already present in AD DNS; and
 - the remote DC accepts TCP connections on 53, 88, 135, 389, and 445.
@@ -180,9 +181,10 @@ notification is sent.
 The monitor runs every five minutes and reads `samba-tool drs showrepl --json`.
 The threshold is applied to Samba's own `consecutive failures` value for every
 non-deleted inbound and outbound replication connection. One message is sent
-per active incident; successful replication resets the incident so a later
-failure can notify again. A failure to execute the health check itself uses
-the same threshold and produces a distinct warning.
+per failing connection; only a successful replication resets that connection
+so a later failure can notify again. A failure to execute the health check
+itself uses the same threshold and produces a separate warning without
+resetting an ongoing replication incident.
 
 The access token is write-only in the UI/API: the read action reports only
 whether a token is configured.
@@ -203,25 +205,41 @@ Build and validate the complete derived image with Docker:
 
 `test-image.sh` verifies the overlay, inherited module labels, expected
 official `samba-dc` runtime tag, executable action steps, and compatibility
-with the upstream action layout.
+with the upstream action layout. The wizard hash in
+`scripts/upstream-wizard.sha256` must be reviewed and updated when upstream
+changes its first-configuration wizard, which the overlay replaces.
 
 ## Release model
 
 `.github/workflows/upstream-release.yml` runs daily and on changes to `main`.
 It queries the latest non-prerelease GitHub release of
-`NethServer/ns8-samba`. When the upstream version changes it:
+`NethServer/ns8-samba`. An upstream update increments the custom minor
+version. Changes to the overlay on `main` increment the patch version when
+upstream stays the same. A missing release uses the recorded version. The
+workflow then:
 
 1. downloads the matching upstream UI source and builds the customized UI;
 2. builds the overlay on that exact upstream module image;
 3. runs the source and image compatibility tests;
-4. updates `UPSTREAM_VERSION` and increments the custom minor version;
-5. pushes the tested image to `ghcr.io/platypuschan/samba`;
+4. updates the version files after successful tests when the version changes;
+5. tags and pushes the same local image that passed the test to
+   `ghcr.io/platypuschan/samba`;
 6. creates a matching Git tag and GitHub release.
 
 If testing fails, neither version files nor packages are released. Upstream
 changes that break one of the reused action steps therefore stop at CI.
-The UI patch also uses explicit source anchors; an incompatible upstream UI
-change fails the candidate build instead of silently dropping custom fields.
+The settings UI patch uses explicit source anchors. A SHA-256 check protects
+the replaced setup wizard from silent upstream changes. A changed wizard
+requires review and a deliberate hash update before a candidate can build.
+
+## Restore of a remote DC
+
+The NS8 module restore action refuses backups made with
+`PROVISION_MODE=join-remote-domain`. Upstream restores a DC by rebuilding a
+domain from the backup; doing that while the original remote DC is live would
+fork the AD database. To recover this DC, create a fresh instance and join it
+to the surviving domain. Supported restores preserve the overlay's monitoring
+settings, including its ntfy token.
 
 ## License
 

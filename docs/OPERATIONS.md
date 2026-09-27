@@ -58,12 +58,20 @@ Run an immediate check without waiting for the five-minute timer:
 runagent -m samba1 check-ad-replication
 ```
 
-The monitor sends one alert for a stable set of failing replication
-connections. It clears that incident latch after all connections are below the
-configured threshold. The state file is
+The monitor sends one alert per failing replication connection. It clears a
+connection's latch only after Samba reports a successful replication, and a
+failed status check leaves existing replication latches intact. The state file is
 `state/ad-replication-monitor-state.json`; disabling notifications removes it.
 The ntfy token is stored in the module environment and is never emitted by the
 `get-replication-monitor` action.
+
+## Restoring a remote-joined DC
+
+The module restore action rejects remote-joined DC backups before the upstream
+domain backup restore step. Rebuild a lost remote-joined DC by installing a
+fresh Samba module, joining the surviving domain, and checking replication in
+both directions. Check the surviving DC for a stale computer account if an
+earlier join failed. Never restore a second, independent copy of a live domain.
 
 ## Removal
 

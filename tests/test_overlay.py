@@ -19,6 +19,7 @@ action = repository / "overlay/imageroot/actions/configure-remote-domain"
 get_monitor = repository / "overlay/imageroot/actions/get-replication-monitor"
 set_monitor = repository / "overlay/imageroot/actions/set-replication-monitor"
 monitor_bin = repository / "overlay/imageroot/bin/check-ad-replication"
+restore = repository / "overlay/imageroot/actions/restore-module"
 
 required_files = {
     "validate-input.json",
@@ -95,6 +96,7 @@ for executable in (
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
+    *(restore / name for name in ("04reject_remote_domain", "07copy_custom_env", "85replication_monitor")),
 ):
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
@@ -110,6 +112,7 @@ python_files = [
     repository / "scripts/next-version.py",
     repository / "tests/test_overlay.py",
     repository / "tests/test_replication_monitor.py",
+    *(restore / name for name in ("04reject_remote_domain", "07copy_custom_env")),
 ]
 for path in python_files:
     compile(path.read_text(), str(path), "exec")
@@ -170,7 +173,7 @@ timer = (
 ).read_text()
 assert "ExecStart=runagent check-ad-replication" in service
 assert "OnUnitActiveSec=5min" in timer
-assert "Persistent=true" in timer
+assert "Persistent=true" not in timer
 
 wrapper_targets = {
     "02validate_ip": "02validate_ip",
@@ -201,6 +204,7 @@ assert "FROM ghcr.io/nethserver/samba:${UPSTREAM_VERSION}" in containerfile
 assert "COPY overlay/ /" in containerfile
 assert "FROM docker.io/library/node:24-slim AS ui-builder" in containerfile
 assert "scripts/patch-ui.mjs" in containerfile
+assert "sha256sum --check /tmp/upstream-wizard.sha256" in containerfile
 assert "COPY --from=ui-builder /usr/src/ui/dist/ /ui/" in containerfile
 
 first_configuration = (
@@ -238,6 +242,8 @@ if image_root is not None:
     assert (
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
+    for filename in ("04reject_remote_domain", "07copy_custom_env", "85replication_monitor"):
+        assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
     assert (
         image_root
         / "imageroot/systemd/user/ad-replication-monitor.timer"
