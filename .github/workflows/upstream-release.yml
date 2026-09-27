@@ -20,6 +20,9 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: ns8-samba-upstream-release
@@ -109,6 +112,15 @@ jobs:
             "${{ steps.target.outputs.custom }}" \
             "${{ steps.source.outputs.sha }}"
 
+      - name: Generate SBOM for tested image
+        if: steps.target.outputs.active == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ns8-samba-reworked:candidate
+          format: spdx-json
+          output-file: samba.spdx.json
+          upload-release-assets: false
+
       - name: Record tested versions
         if: >-
           steps.target.outputs.active == 'true' &&
@@ -133,6 +145,7 @@ jobs:
 
       - name: Publish tested module image
         if: steps.target.outputs.active == 'true'
+        id: publish
         run: |
           set -euo pipefail
           image='${{ steps.target.outputs.image }}'
@@ -140,8 +153,31 @@ jobs:
           for tag in '${{ steps.target.outputs.custom }}' 'upstream-${{ steps.target.outputs.upstream }}' latest; do
             docker tag ns8-samba-reworked:candidate "${image}:${tag}"
             [[ $(docker image inspect --format '{{.Id}}' "${image}:${tag}") == "${candidate_id}" ]]
-            docker push "${image}:${tag}"
+            push_output=$(docker push "${image}:${tag}")
+            printf '%s\n' "${push_output}"
+            if [[ ${tag} == '${{ steps.target.outputs.custom }}' ]]; then
+              digest=$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' <<< "${push_output}")
+              [[ ${digest} =~ ^sha256:[0-9a-f]{64}$ ]]
+              printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+            fi
           done
+
+      - name: Attest tested image provenance
+        if: steps.target.outputs.active == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.target.outputs.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest tested image SBOM
+        if: steps.target.outputs.active == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.target.outputs.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: samba.spdx.json
+          push-to-registry: true
 
       - name: Create GitHub release
         if: steps.target.outputs.active == 'true'

@@ -225,7 +225,8 @@ workflow then:
 4. updates the version files after successful tests when the version changes;
 5. tags and pushes the same local image that passed the test to
    `ghcr.io/platypuschan/samba`;
-6. creates a matching Git tag and GitHub release.
+6. attaches build provenance and an SBOM to its published digest;
+7. creates a matching Git tag and GitHub release.
 
 If testing fails, neither version files nor packages are released. Upstream
 changes that break one of the reused action steps therefore stop at CI.
