@@ -1,0 +1,103 @@
+#!/bin/bash
+
+#
+# Copyright (C) 2021 Nethesis S.r.l.
+# http://www.nethesis.it - nethserver@nethesis.it
+#
+# This script is part of NethServer.
+#
+# NethServer is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License,
+# or any later version.
+#
+# NethServer is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with NethServer.  If not, see COPYING.
+#
+
+exec 1>&2
+set -e
+
+if [[ -f timescaledb.env ]] && ! podman volume exists timescaledb; then
+    # TimescaleDB restore, see https://www.tigerdata.com/docs/self-hosted/latest/backup-and-restore/physical
+    echo "Restore TimescaleDB for samba_audit:"
+    # Extract the complete pg_basebackup archive into $PGDATA directory.
+    # From NS8 core backup behavior, we can assume that PostgreSQL
+    # versions of backup/restore are the same.
+    podman run \
+        --log-driver=none \
+        --network=none \
+        --replace --name=timescaledb --rm \
+        --volume=tsdb_backup:/srv/tsdb_backup:z \
+        --volume=timescaledb:/var/lib/postgresql/data:z \
+        --entrypoint=[] \
+        --interactive \
+        "${TIMESCALEDB_IMAGE}" sh -e -x -c '
+            tar -C /var/lib/postgresql/data -xf /srv/tsdb_backup/pgdata/base.tar
+            tar -C /var/lib/postgresql/data/pg_wal -xf /srv/tsdb_backup/pgdata/pg_wal.tar
+            rm -rfv /srv/tsdb_backup/pgdata
+        '
+fi
+
+if [[ ${PROVISION_MODE:-} == join-remote-domain ]]; then
+    if [[ -f "${AGENT_STATE_DIR:?}/remote-restore-joined" ]]; then
+        echo 'Remote DC is running as a member of the surviving domain.'
+        # The offline archive is no longer needed on the joined DC.
+        podman exec samba-dc rm -rf /var/lib/samba/backup || \
+            echo 'Could not remove the used backup archive; remove it after restore.'
+        exit 0
+    fi
+    echo 'FORCED RESTORE: recovering an independent domain copy from the backup.'
+    echo 'If the previous domain is still live, its directory will diverge from this DC.'
+fi
+
+echo "Resume Samba ${SERVER_ROLE^^} state:"
+podman run --hostname="${HOSTNAME}" --interactive --workdir=/var/lib/samba \
+    --log-driver=none \
+    --replace --name=samba-restore --rm \
+    --entrypoint=[] \
+    --env=SERVER_ROLE \
+    --volume="config":/etc/samba \
+    --volume="data":/var/lib/samba \
+    "${SAMBA_DC_IMAGE}" bash -s <<'EOF'
+
+set -e
+nbname=$(hostname -s | tr "[a-z]" "[A-Z]")
+
+if [[ "${SERVER_ROLE}" == "member" ]] ; then
+    tar -x -f backup/samba-backup.tar.bz2 -v
+    find . -type f -name '*.bak' | while read -r tdbbak ; do
+        mv -v "${tdbbak}" "${tdbbak%%.bak}"
+    done
+    rm -rvf backup
+else
+    samba-tool domain backup restore \
+        --backup-file=backup/samba-backup.tar.bz2 \
+        --targetdir=restore \
+        --newservername=${nbname}
+
+    sed "s/netbios name = .*/netbios name = ${nbname}/" restore/etc/smb.conf.orig | tee /etc/samba/smb.conf
+
+    rm -rvf private sysvol
+    mv -v restore/private .
+    mv -v restore/state/sysvol .
+    mv -vf restore/state/*.tdb .
+    rm -rvf restore backup
+fi
+net cache flush
+EOF
+
+if [[ -n "${IPADDRESS}" && -n "${REALM}" ]] ; then
+    # Enable and start Samba only if both IPADDRESS and REALM were set
+    # correctly:
+    systemctl --user enable --now samba-dc.service
+fi
+
+if [[ ${PROVISION_MODE:-} == join-remote-domain ]]; then
+    printf 'forced\n' > "${AGENT_STATE_DIR:?}/remote-restore-mode"
+fi

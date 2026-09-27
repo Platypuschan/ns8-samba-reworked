@@ -552,10 +552,15 @@ export default {
             "error.incorrect_username_or_password"
           );
         } else if (Object.prototype.hasOwnProperty.call(this.error, field)) {
-          this.error[field] = this.getI18nStringWithFallback(
-            "remote_join." + validationError.error,
-            "error." + validationError.error
-          );
+          this.error[field] = this.isRemoteDomainController
+            ? this.getI18nStringWithFallback(
+                "remote_join." + validationError.error,
+                "error." + validationError.error
+              )
+            : this.getI18nStringWithFallback(
+                "welcome." + validationError.error,
+                "error." + validationError.error
+              );
         }
 
         if (!focusAlreadySet) {

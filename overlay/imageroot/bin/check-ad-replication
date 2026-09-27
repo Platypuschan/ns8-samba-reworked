@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -68,28 +67,20 @@ def send_ntfy(title, message):
             raise RuntimeError(f"ntfy returned HTTP {response.status}")
 
 
-def notify_once(state, incident_key, title, message):
-    if state.get("active_incident") == incident_key:
-        return
-    send_ntfy(title, message)
-    state["active_incident"] = incident_key
-
-
 def handle_probe_failure(state, threshold, error):
     probe_failures = int(state.get("probe_failures", 0)) + 1
     state["probe_failures"] = probe_failures
-    if probe_failures >= threshold:
+    if probe_failures >= threshold and not state.get("probe_alert_sent", False):
         hostname = os.getenv("HOSTNAME", os.getenv("MODULE_ID", "Samba DC"))
         try:
-            notify_once(
-                state,
-                "replication-probe-failed",
+            send_ntfy(
                 f"AD replication check failed on {hostname}",
                 (
                     f"The AD replication status check failed {probe_failures} "
                     f"consecutive times.\n\n{error}"
                 ),
             )
+            state["probe_alert_sent"] = True
         except Exception as exception:
             print(f"Unable to send ntfy notification: {exception}", file=sys.stderr)
             save_state(state)
@@ -98,17 +89,29 @@ def handle_probe_failure(state, threshold, error):
     return True
 
 
-def replication_failures(payload, threshold):
+def replication_status(payload, threshold):
     failures = []
+    recovered = set()
     for direction, key in (("inbound", "repsFrom"), ("outbound", "repsTo")):
         for replication in payload.get(key, []):
+            identity = "|".join(
+                (
+                    direction,
+                    str(replication.get("NC dn", "unknown")),
+                    str(replication.get("DSA objectGUID", replication.get("DSA", "unknown"))),
+                )
+            )
             if replication.get("is deleted"):
+                recovered.add(identity)
                 continue
             count = int(replication.get("consecutive failures", 0))
+            if count == 0:
+                recovered.add(identity)
             if count < threshold:
                 continue
             failures.append(
                 {
+                    "identity": identity,
                     "direction": direction,
                     "naming_context": replication.get("NC dn", "unknown"),
                     "dsa": replication.get(
@@ -119,7 +122,11 @@ def replication_failures(payload, threshold):
                     "message": replication.get("last attempt message", "unknown"),
                 }
             )
-    return failures
+    return failures, recovered
+
+
+def replication_failures(payload, threshold):
+    return replication_status(payload, threshold)[0]
 
 
 def format_failure_message(failures, threshold):
@@ -175,7 +182,7 @@ def main():
                 f"samba-tool drs showrepl exited with {result.returncode}: {error}"
             )
         payload = json.loads(result.stdout)
-        failures = replication_failures(payload, threshold)
+        failures, recovered = replication_status(payload, threshold)
     except (
         AttributeError,
         json.JSONDecodeError,
@@ -188,29 +195,25 @@ def main():
         print(f"AD replication status check failed: {exception}", file=sys.stderr)
         return 0 if handle_probe_failure(state, threshold, str(exception)) else 1
 
-    if not failures:
-        save_state({"probe_failures": 0})
-        return 0
-
-    incident_parts = sorted(
-        f"{failure['direction']}|{failure['dsa']}|{failure['naming_context']}"
-        for failure in failures
-    )
-    incident_key = hashlib.sha256("\n".join(incident_parts).encode()).hexdigest()
+    state["probe_failures"] = 0
+    state["probe_alert_sent"] = False
+    active = set(state.get("active_replication", [])) - recovered
+    new_failures = [failure for failure in failures if failure["identity"] not in active]
     hostname = os.getenv("HOSTNAME", os.getenv("MODULE_ID", "Samba DC"))
     try:
-        notify_once(
-            state,
-            incident_key,
-            f"AD replication failed on {hostname}",
-            format_failure_message(failures, threshold),
-        )
+        if new_failures:
+            send_ntfy(
+                f"AD replication failed on {hostname}",
+                format_failure_message(new_failures, threshold),
+            )
     except Exception as exception:
         print(f"Unable to send ntfy notification: {exception}", file=sys.stderr)
-        save_state({"probe_failures": 0})
+        state["active_replication"] = sorted(active)
+        save_state(state)
         return 1
 
-    state["probe_failures"] = 0
+    active.update(failure["identity"] for failure in new_failures)
+    state["active_replication"] = sorted(active)
     save_state(state)
     return 0
 

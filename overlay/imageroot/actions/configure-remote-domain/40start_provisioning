@@ -4,7 +4,9 @@
 
 exec 4>&1
 exec 1>&2
-set -e
+set -euo pipefail
+podman_bin=${PODMAN_BIN:-/usr/bin/podman}
+[[ ${PROVISION_TYPE:?} == join-domain ]]
 
 readarray -t input < <(jq -r '.adminuser, .adminpass')
 
@@ -19,7 +21,7 @@ chmod 0600 "${tmpenv}"
     printf '\n'
 ) > "${tmpenv}"
 
-/usr/bin/podman run \
+"${podman_bin}" run \
     --dns=none \
     --no-hosts \
     --network=host \
@@ -41,16 +43,36 @@ chmod 0600 "${tmpenv}"
     --volume=config:/etc/samba:z \
     --volume=shares:/srv/shares:z \
     --volume=homes:/srv/homes:z \
-    "${SAMBA_DC_IMAGE:?}" "${PROVISION_TYPE:?}" || exit_code=$?
+    --volume="${AGENT_INSTALL_DIR:?}/bin/join-domain-checked:/run/join-domain-checked:ro,z" \
+    "${SAMBA_DC_IMAGE:?}" /run/join-domain-checked || exit_code=$?
+
+# Run the corrected join script in the official image. Before starting or
+# advertising the DC, also confirm that the join created its local AD database.
+if [[ ${exit_code:-0} == 0 ]]; then
+    if ! "${podman_bin}" run \
+        --network=host \
+        --entrypoint=/bin/bash \
+        --log-driver=none \
+        --rm \
+        --volume=data:/var/lib/samba:z \
+        --volume=config:/etc/samba:z \
+        "${SAMBA_DC_IMAGE:?}" -c \
+        'test -s /var/lib/samba/private/sam.ldb'; then
+        printf 'Provisioning failed: local AD database missing. Check the remote DC for a stale computer account before retrying.\n' >&2
+        exit_code=1
+    fi
+fi
+
+if [[ ${exit_code:-0} != 0 ]]; then
+    sed -i '/^IPADDRESS=/ d' environment
+fi
 
 if [[ ${exit_code:-0} == 33 ]]; then
-    sed -i '/^IPADDRESS=/ d' environment
     printf 'set-status validation-failed\n' >&"${AGENT_COMFD:-2}"
     printf 'Provisioning error: invalid credentials\n' >&2
     jq -n --arg name "${input[0]}" \
         '[{"field":"adminuser","parameter":"adminuser","value":$name,"error":"invalid_credentials"}]' >&4
 elif [[ ${exit_code:-0} == 34 ]]; then
-    sed -i '/^IPADDRESS=/ d' environment
     printf 'set-status validation-failed\n' >&"${AGENT_COMFD:-2}"
     printf 'Provisioning error: insufficient permissions\n' >&2
     jq -n --arg name "${input[0]}" \

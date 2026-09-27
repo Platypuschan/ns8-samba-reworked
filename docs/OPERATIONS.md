@@ -58,12 +58,38 @@ Run an immediate check without waiting for the five-minute timer:
 runagent -m samba1 check-ad-replication
 ```
 
-The monitor sends one alert for a stable set of failing replication
-connections. It clears that incident latch after all connections are below the
-configured threshold. The state file is
+The monitor sends one alert per failing replication connection. It clears a
+connection's latch only after Samba reports a successful replication, and a
+failed status check leaves existing replication latches intact. The state file is
 `state/ad-replication-monitor-state.json`; disabling notifications removes it.
 The ntfy token is stored in the module environment and is never emitted by the
 `get-replication-monitor` action.
+
+## Restoring a remote-joined DC
+
+For `PROVISION_MODE=join-remote-domain`, the module attempts a fresh join using
+the saved peer address, realm, service account, and password. A module-level
+restore request may supply one-time `recovery_adminuser` and
+`recovery_adminpass` for the join. The cluster restore action does not forward
+those fields; with the usual non-admin `ldapservice` account its join will
+normally fail. After join, the DC must start and report a DRS connection. On
+any failure the action stops a partially started DC, restores the offline
+domain archive, and starts the independent DC. Inspect
+`state/remote-restore-mode` and the restore log to see `joined` or `forced`.
+
+**A forced restore can split a live domain.** Keep the two copies isolated
+until you choose which one will be authoritative. Verify authentication against
+the restored DC, then reconcile client DNS settings and any directory changes.
+A failed or partially successful join can leave a stale DC computer account
+on the original domain; check that side before trying another join. If the
+restored `IPADDRESS` is unavailable on the target node, set a usable address
+before expecting the DC to serve clients. Monitoring settings from the backup
+are retained.
+
+During provisioning the module bind-mounts a corrected copy of the upstream
+`join-domain` script into the official Samba runtime image. This preserves
+the actual `samba-tool domain join` exit code before the DC is started. After
+installation, check both inbound and outbound replication on the running DC.
 
 ## Removal
 

@@ -19,6 +19,7 @@ action = repository / "overlay/imageroot/actions/configure-remote-domain"
 get_monitor = repository / "overlay/imageroot/actions/get-replication-monitor"
 set_monitor = repository / "overlay/imageroot/actions/set-replication-monitor"
 monitor_bin = repository / "overlay/imageroot/bin/check-ad-replication"
+restore = repository / "overlay/imageroot/actions/restore-module"
 
 required_files = {
     "validate-input.json",
@@ -92,9 +93,11 @@ for executable in (
     get_monitor / "50read",
     set_monitor / "50set",
     monitor_bin,
+    repository / "overlay/imageroot/bin/join-domain-checked",
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
+    *(restore / name for name in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor")),
 ):
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
@@ -110,6 +113,7 @@ python_files = [
     repository / "scripts/next-version.py",
     repository / "tests/test_overlay.py",
     repository / "tests/test_replication_monitor.py",
+    restore / "07copy_custom_env",
 ]
 for path in python_files:
     compile(path.read_text(), str(path), "exec")
@@ -135,7 +139,9 @@ assert "secrets" not in set_env
 provision = (action / "40start_provisioning").read_text()
 assert '"${JOINADDRESS:?}"' in provision
 assert "print-joinaddress" not in provision
-assert '"${SAMBA_DC_IMAGE:?}" "${PROVISION_TYPE:?}"' in provision
+assert '"${SAMBA_DC_IMAGE:?}" /run/join-domain-checked' in provision
+join_script = (repository / "overlay/imageroot/bin/join-domain-checked").read_text()
+assert "exit_code=${PIPESTATUS[0]}" in join_script
 
 remote_validation = (action / "03validate_remote").read_text()
 for port in (53, 88, 135, 389, 445):
@@ -170,7 +176,7 @@ timer = (
 ).read_text()
 assert "ExecStart=runagent check-ad-replication" in service
 assert "OnUnitActiveSec=5min" in timer
-assert "Persistent=true" in timer
+assert "Persistent=true" not in timer
 
 wrapper_targets = {
     "02validate_ip": "02validate_ip",
@@ -191,7 +197,7 @@ assert not any("samba-dc" in path for path in overlay_paths)
 overlay_code = "\n".join(
     path.read_text(errors="replace")
     for path in (repository / "overlay").rglob("*")
-    if path.is_file()
+    if path.is_file() and path != restore / "60resume_state"
 )
 assert "sysvol" not in overlay_code.lower()
 assert "logon script" not in overlay_code.lower()
@@ -201,7 +207,15 @@ assert "FROM ghcr.io/nethserver/samba:${UPSTREAM_VERSION}" in containerfile
 assert "COPY overlay/ /" in containerfile
 assert "FROM docker.io/library/node:24-slim AS ui-builder" in containerfile
 assert "scripts/patch-ui.mjs" in containerfile
+assert "sha256sum --check /tmp/upstream-wizard.sha256" in containerfile
+assert "sha256sum --check /tmp/upstream-join-domain.sha256" in containerfile
+assert "sha256sum --check /tmp/upstream-restore-state.sha256" in containerfile
 assert "COPY --from=ui-builder /usr/src/ui/dist/ /ui/" in containerfile
+
+restore_schema = json.loads((restore / "validate-input.json").read_text())
+assert restore_schema["properties"]["recovery_adminpass"]["writeOnly"] is True
+assert restore_schema["dependencies"]["recovery_adminuser"] == ["recovery_adminpass"]
+assert "remote-restore-joined" in (restore / "60resume_state").read_text()
 
 first_configuration = (
     repository
@@ -238,6 +252,9 @@ if image_root is not None:
     assert (
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
+    assert (image_root / "imageroot/bin/join-domain-checked").is_file()
+    for filename in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor", "validate-input.json"):
+        assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
     assert (
         image_root
         / "imageroot/systemd/user/ad-replication-monitor.timer"
