@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# The remote-join branch starts Samba before 60resume_state. Restore audit
+# history first, before timescaledb.service can initialize an empty volume.
+# This is the same physical restore used by upstream 60resume_state.
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+exec 1>&2
+set -e
+[[ ${PROVISION_MODE:-} == join-remote-domain ]] || exit 0
+
+if [[ -f timescaledb.env ]] && ! podman volume exists timescaledb; then
+    echo 'Restore TimescaleDB for samba_audit before joining the DC:'
+    podman run \
+        --log-driver=none \
+        --network=none \
+        --replace --name=timescaledb --rm \
+        --volume=tsdb_backup:/srv/tsdb_backup:z \
+        --volume=timescaledb:/var/lib/postgresql/data:z \
+        --entrypoint=[] \
+        --interactive \
+        "${TIMESCALEDB_IMAGE}" sh -e -x -c '
+            tar -C /var/lib/postgresql/data -xf /srv/tsdb_backup/pgdata/base.tar
+            tar -C /var/lib/postgresql/data/pg_wal -xf /srv/tsdb_backup/pgdata/pg_wal.tar
+            rm -rfv /srv/tsdb_backup/pgdata
+        '
+fi

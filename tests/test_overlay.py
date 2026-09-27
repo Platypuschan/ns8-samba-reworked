@@ -97,7 +97,7 @@ for executable in (
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
-    *(restore / name for name in ("04reject_remote_domain", "07copy_custom_env", "85replication_monitor")),
+    *(restore / name for name in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor")),
 ):
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
@@ -113,7 +113,7 @@ python_files = [
     repository / "scripts/next-version.py",
     repository / "tests/test_overlay.py",
     repository / "tests/test_replication_monitor.py",
-    *(restore / name for name in ("04reject_remote_domain", "07copy_custom_env")),
+    restore / "07copy_custom_env",
 ]
 for path in python_files:
     compile(path.read_text(), str(path), "exec")
@@ -197,7 +197,7 @@ assert not any("samba-dc" in path for path in overlay_paths)
 overlay_code = "\n".join(
     path.read_text(errors="replace")
     for path in (repository / "overlay").rglob("*")
-    if path.is_file()
+    if path.is_file() and path != restore / "60resume_state"
 )
 assert "sysvol" not in overlay_code.lower()
 assert "logon script" not in overlay_code.lower()
@@ -209,7 +209,13 @@ assert "FROM docker.io/library/node:24-slim AS ui-builder" in containerfile
 assert "scripts/patch-ui.mjs" in containerfile
 assert "sha256sum --check /tmp/upstream-wizard.sha256" in containerfile
 assert "sha256sum --check /tmp/upstream-join-domain.sha256" in containerfile
+assert "sha256sum --check /tmp/upstream-restore-state.sha256" in containerfile
 assert "COPY --from=ui-builder /usr/src/ui/dist/ /ui/" in containerfile
+
+restore_schema = json.loads((restore / "validate-input.json").read_text())
+assert restore_schema["properties"]["recovery_adminpass"]["writeOnly"] is True
+assert restore_schema["dependencies"]["recovery_adminuser"] == ["recovery_adminpass"]
+assert "remote-restore-joined" in (restore / "60resume_state").read_text()
 
 first_configuration = (
     repository
@@ -247,7 +253,7 @@ if image_root is not None:
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
     assert (image_root / "imageroot/bin/join-domain-checked").is_file()
-    for filename in ("04reject_remote_domain", "07copy_custom_env", "85replication_monitor"):
+    for filename in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor", "validate-input.json"):
         assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
     assert (
         image_root

@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+exec 1>&2
+set -euo pipefail
+
+marker="${AGENT_STATE_DIR:?}/remote-restore-joined"
+rm -f -- "${marker}"
+rm -f -- "${AGENT_STATE_DIR}/remote-restore-mode"
+[[ ${PROVISION_MODE:-} == join-remote-domain ]] || exit 0
+
+# The backup includes the offline domain archive, not the local DC database.
+# A restore always needs a fresh join before it can use the surviving domain.
+# Normal cluster restores cannot forward one-time credentials; the saved
+# service account is tried in case it has been delegated join permissions.
+readarray -t credentials < <(jq -r '.recovery_adminuser // "", .recovery_adminpass // ""')
+if [[ -n ${credentials[0]} && -n ${credentials[1]} ]]; then
+    echo 'Attempting a fresh join of the surviving domain with one-time credentials.'
+else
+    credentials=("${SVCUSER:-}" "${SVCPASS:-}")
+    echo 'Attempting a fresh join of the surviving domain with saved service credentials.'
+fi
+
+if [[ -z ${IPADDRESS:-} || -z ${HOSTNAME:-} || -z ${JOINADDRESS:-} ||
+      -z ${REALM:-} || -z ${credentials[0]} || -z ${credentials[1]} ||
+      ${PROVISION_TYPE:-} != join-domain ]]; then
+    echo 'Join prerequisites are incomplete; falling back to an independent domain backup restore.'
+    exit 0
+fi
+
+podman_bin=${PODMAN_BIN:-/usr/bin/podman}
+stop_joined_dc() {
+    systemctl --user stop samba-dc.service || true
+    if systemctl --user is-active --quiet samba-dc.service; then
+        "${podman_bin}" stop --ignore samba-dc || true
+        systemctl --user stop samba-dc.service || true
+        if systemctl --user is-active --quiet samba-dc.service; then
+            echo 'The joined DC could not be stopped; cannot replace its live database.'
+            exit 1
+        fi
+    fi
+}
+
+tmpenv=$(mktemp)
+trap 'rm -f -- "${tmpenv}"' EXIT
+chmod 0600 "${tmpenv}"
+(
+    printf 'JOINADDRESS=%s\n' "${JOINADDRESS}"
+    printf 'ADMINCREDS='
+    printf '%s\t%s' "${credentials[0]}" "${credentials[1]}" | base64 --wrap=0
+    printf '\n'
+) > "${tmpenv}"
+unset credentials
+
+if ! timeout 300 "${podman_bin}" run \
+    --dns=none --no-hosts --network=host --interactive \
+    --env=REALM --env=IPADDRESS --env=PREFIXLEN --env=NBDOMAIN \
+    --env=SVCPASS --env=SVCUSER --env-file="${tmpenv}" \
+    --env=SERVER_ROLE --env=DNS1ADDRESS --env=DNS2ADDRESS \
+    --hostname="${HOSTNAME}" --log-driver=none \
+    --rm --replace --name=samba-provisioning \
+    --volume=data:/var/lib/samba:z --volume=config:/etc/samba:z \
+    --volume=shares:/srv/shares:z --volume=homes:/srv/homes:z \
+    --volume="${AGENT_INSTALL_DIR:?}/bin/join-domain-checked:/run/join-domain-checked:ro,z" \
+    "${SAMBA_DC_IMAGE:?}" /run/join-domain-checked; then
+    "${podman_bin}" rm --force --ignore samba-provisioning || true
+    echo 'Domain join failed. The DC computer account may need cleanup on the surviving DC.'
+    echo 'Falling back to an independent domain backup restore.'
+    exit 0
+fi
+rm -f -- "${tmpenv}"
+
+if ! "${podman_bin}" run --network=host --entrypoint=/bin/bash \
+    --log-driver=none --rm --volume=data:/var/lib/samba:z \
+    --volume=config:/etc/samba:z "${SAMBA_DC_IMAGE}" \
+    -c 'test -s /var/lib/samba/private/sam.ldb'; then
+    echo 'Join returned success without a local AD database; forcing domain backup restore.'
+    exit 0
+fi
+
+if ! timeout 120 systemctl --user enable --now samba-dc.service; then
+    echo 'Joined DC did not start; forcing domain backup restore.'
+    stop_joined_dc
+    exit 0
+fi
+
+# A successful join and a running DC must both be observable before the
+# offline domain archive can be skipped. The service may need a few seconds
+# to publish its DRS endpoint after its listening ports become available.
+for attempt in 1 2 3 4 5 6; do
+    if timeout 20 "${podman_bin}" exec samba-dc samba-tool drs showrepl --json \
+        | jq -e 'type == "object" and ((.repsFrom // []) | any((.["consecutive failures"] | tonumber? // 1) == 0))' >/dev/null; then
+        printf 'joined\n' > "${marker}"
+        printf 'joined\n' > "${AGENT_STATE_DIR}/remote-restore-mode"
+        echo 'The restored DC joined the surviving domain and exposes a DRS connection.'
+        exit 0
+    fi
+    [[ ${attempt} == 6 ]] || sleep 5
+done
+
+echo 'Joined DC has no working DRS view; forcing domain backup restore.'
+stop_joined_dc

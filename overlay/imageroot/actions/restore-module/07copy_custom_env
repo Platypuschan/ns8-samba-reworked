@@ -9,9 +9,6 @@ import agent
 
 
 environment = json.load(sys.stdin)["environment"]
-if environment.get("PROVISION_MODE") == "join-remote-domain":
-    raise SystemExit("Remote DC restore is unsafe and must be rejected before copying environment")
-
 for key in (
     "PROVISION_MODE",
     "JOINADDRESS",

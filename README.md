@@ -236,12 +236,34 @@ change requires review and a deliberate hash update before a candidate builds.
 
 ## Restore of a remote DC
 
-The NS8 module restore action refuses backups made with
-`PROVISION_MODE=join-remote-domain`. Upstream restores a DC by rebuilding a
-domain from the backup; doing that while the original remote DC is live would
-fork the AD database. To recover this DC, create a fresh instance and join it
-to the surviving domain. Supported restores preserve the overlay's monitoring
-settings, including its ntfy token.
+For a backup made with `PROVISION_MODE=join-remote-domain`, restore first tries
+to join a new DC to the saved `JOINADDRESS` with the saved `SVCUSER` and
+`SVCPASS`. It uses the corrected join script and requires a local AD database,
+a started DC, and a DRS connection. A successful join skips the offline domain
+archive. The restored DC receives a new name with an `rN` suffix, as in the
+upstream restore flow. The backup does not contain a reusable local DC database,
+so an old computer account alone cannot resume the original DC.
+
+The default `ldapservice` account usually lacks DC join permission. The normal
+cluster restore does not accept a one-time domain administrator password. In
+that case, or if the join/start/DRS check fails, restore **automatically forces
+an independent domain restore** from the offline archive and starts the DC.
+This may create two divergent copies of the same domain if another DC is still
+live. Authentication against the restored DC remains available, but changes
+made on the other copy will not automatically appear here. Decide which copy
+to keep before reconnecting replication or making directory changes.
+
+An administrator orchestrating the module-level `restore-module` action
+directly may pass `recovery_adminuser` and `recovery_adminpass` in its request
+alongside the usual backup repository, path, snapshot, and environment fields.
+These credentials are used only for the join attempt and are not written to
+the module environment or backup. The standard cluster restore does not
+forward these fields. The result is recorded in
+`state/remote-restore-mode` (`joined` or `forced`) and in the restore log.
+The overlay's monitoring settings, including its ntfy token, are preserved.
+If the original IP address cannot be assigned on the target node, upstream
+leaves `IPADDRESS` empty and the restored DC cannot start until an address is
+configured.
 
 ## License
 

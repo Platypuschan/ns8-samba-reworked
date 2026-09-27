@@ -67,11 +67,24 @@ The ntfy token is stored in the module environment and is never emitted by the
 
 ## Restoring a remote-joined DC
 
-The module restore action rejects remote-joined DC backups before the upstream
-domain backup restore step. Rebuild a lost remote-joined DC by installing a
-fresh Samba module, joining the surviving domain, and checking replication in
-both directions. Check the surviving DC for a stale computer account if an
-earlier join failed. Never restore a second, independent copy of a live domain.
+For `PROVISION_MODE=join-remote-domain`, the module attempts a fresh join using
+the saved peer address, realm, service account, and password. A module-level
+restore request may supply one-time `recovery_adminuser` and
+`recovery_adminpass` for the join. The cluster restore action does not forward
+those fields; with the usual non-admin `ldapservice` account its join will
+normally fail. After join, the DC must start and report a DRS connection. On
+any failure the action stops a partially started DC, restores the offline
+domain archive, and starts the independent DC. Inspect
+`state/remote-restore-mode` and the restore log to see `joined` or `forced`.
+
+**A forced restore can split a live domain.** Keep the two copies isolated
+until you choose which one will be authoritative. Verify authentication against
+the restored DC, then reconcile client DNS settings and any directory changes.
+A failed or partially successful join can leave a stale DC computer account
+on the original domain; check that side before trying another join. If the
+restored `IPADDRESS` is unavailable on the target node, set a usable address
+before expecting the DC to serve clients. Monitoring settings from the backup
+are retained.
 
 During provisioning the module bind-mounts a corrected copy of the upstream
 `join-domain` script into the official Samba runtime image. This preserves
