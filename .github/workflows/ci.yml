@@ -20,3 +20,33 @@ jobs:
 
       - name: Build and test derived module
         run: ./scripts/test-image.sh
+
+  integration:
+    # Two real Samba DCs from the upstream samba-dc image; see integration/run.sh.
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-dnspython
+
+      - name: Run two-DC integration test
+        run: sudo --preserve-env=GITHUB_STEP_SUMMARY ./integration/run.sh "${RUNNER_TEMP}/samba-it"
+
+      - name: Prepare logs
+        if: always()
+        run: |
+          sudo rm -rf "${RUNNER_TEMP}/samba-it/work/backup"
+          sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/samba-it"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: samba-integration-logs
+          path: ${{ runner.temp }}/samba-it
+          if-no-files-found: ignore

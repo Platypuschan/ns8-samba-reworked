@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# NS8 runs the DC with --network=host. Both test DCs share one runner, so the
+# DC under test gets its own address in the integration network instead.
+set -euo pipefail
+
+dc_container=
+for argument; do
+    case ${argument} in
+        --name=samba-provisioning | --name=samba-dc) dc_container=1 ;;
+    esac
+done
+
+arguments=()
+for argument; do
+    if [[ ${argument} == --network=host ]]; then
+        arguments+=("--network=${IT_NETWORK:?}")
+        if [[ -n ${dc_container} ]]; then
+            arguments+=("--ip=${IT_B_IP:?}")
+        fi
+    else
+        arguments+=("${argument}")
+    fi
+done
+
+exec /usr/bin/podman "${arguments[@]}"
