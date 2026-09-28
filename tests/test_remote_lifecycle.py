@@ -78,6 +78,31 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         agent.set_env.assert_not_called()
 
+    def test_join_credentials_reject_linebreaks_without_echoing_secrets(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        payload = {"adminuser": "Administrator", "adminpass": "secret"}
+        for field, value in (("adminuser", "Admin\nother"),
+                             ("adminpass", "secret\rsecond")):
+            with self.subTest(field=field):
+                output = io.StringIO()
+                with mock.patch.dict(sys.modules, {"agent": agent}), mock.patch.object(
+                    sys, "stdin", io.StringIO(json.dumps({**payload, field: value}))
+                ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        runpy.run_path(str(ACTIONS / "configure-remote-domain/01validate_credentials"),
+                                       run_name="__main__")
+                self.assertEqual(caught.exception.code, 2)
+                error = json.loads(output.getvalue())[0]
+                self.assertEqual(error["field"], field)
+                self.assertEqual(error["value"], "")
+                self.assertEqual(error["error"], "invalid_join_credentials_linebreak")
+                self.assertNotIn(value, output.getvalue())
+        agent.set_status.assert_called_with("validation-failed")
+        self.run_action(ACTIONS / "configure-remote-domain/01validate_credentials",
+                        payload, {"agent": agent})
+
     def test_monitor_rejects_multiline_settings_even_when_disabled(self):
         agent = types.ModuleType("agent")
         agent.set_env = mock.Mock()

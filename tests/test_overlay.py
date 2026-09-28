@@ -24,6 +24,7 @@ set_ipaddress = repository / "overlay/imageroot/actions/set-ipaddress"
 
 required_files = {
     "validate-input.json",
+    "01validate_credentials",
     "01validate_realm",
     "02validate_ip",
     "02validate_lo",
@@ -105,6 +106,7 @@ for executable in (
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
 python_files = [
+    action / "01validate_credentials",
     action / "01validate_realm",
     action / "03validate_remote",
     action / "05set_env",
