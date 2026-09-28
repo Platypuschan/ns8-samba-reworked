@@ -218,7 +218,7 @@ It queries the latest non-prerelease GitHub release of
 version. Changes to the overlay on `main` increment the patch version when
 upstream stays the same. Scheduled runs compare image and build paths with
 the last release tag, so documentation-only changes do not trigger a release.
-A missing release uses the recorded version. The
+A missing release for an untagged version uses the recorded version. The
 workflow then:
 
 1. downloads the matching upstream UI source and builds the customized UI;
@@ -232,6 +232,10 @@ workflow then:
 
 If testing fails, neither version files nor packages are released. Upstream
 changes that break one of the reused action steps therefore stop at CI.
+An existing version tag without a GitHub release needs manual reconciliation
+with its published image; the workflow refuses to rebuild and overwrite that
+tag. Queued runs check out the current `main` when they start and abandon a
+candidate if `main` changes during testing.
 The settings UI patch uses explicit source anchors. SHA-256 checks protect
 the replaced setup wizard and join script from silent upstream changes. Either
 change requires review and a deliberate hash update before a candidate builds.
@@ -276,6 +280,8 @@ object, and DNS A/SRV records in the surviving domain; inspect and clean them
 manually before another join. Restore does not delete those remote objects.
 The local DRS view alone cannot prove that the surviving DC pulled changes
 from the new DC; check its replication status after a successful restore.
+Changing the address later with `set-ipaddress` also rejects the cluster VPN
+range for remote-joined DCs.
 
 ## License
 

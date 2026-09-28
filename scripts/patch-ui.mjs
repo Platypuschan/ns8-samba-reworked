@@ -78,6 +78,8 @@ const translations = {
         "The existing and new domain controller IP addresses must differ.",
       dc_vpn_address_forbidden:
         "Select a directly reachable DC address outside the NS8 cluster VPN range.",
+      invalid_environment_linebreak:
+        "The ldapservice password cannot contain a line break.",
       remote_dc_dns_check_failed:
         "The existing domain controller did not answer the required AD DNS lookup.",
       hostname_check_failed:
@@ -113,6 +115,8 @@ const translations = {
       invalid_failure_threshold: "Enter a whole number from 1 to 1000.",
       not_domain_controller:
         "Replication monitoring is available only on a domain controller.",
+      invalid_environment_linebreak:
+        "This setting cannot contain a line break.",
     },
   },
   de: {
@@ -154,6 +158,8 @@ const translations = {
         "Die IP-Adressen des vorhandenen und des neuen Domänencontrollers müssen unterschiedlich sein.",
       dc_vpn_address_forbidden:
         "Wähle eine direkt erreichbare DC-Adresse außerhalb des NS8-Cluster-VPNs.",
+      invalid_environment_linebreak:
+        "Das ldapservice-Passwort darf keinen Zeilenumbruch enthalten.",
       remote_dc_dns_check_failed:
         "Der vorhandene Domänencontroller hat die erforderliche AD-DNS-Abfrage nicht beantwortet.",
       hostname_check_failed:
@@ -192,6 +198,8 @@ const translations = {
       invalid_failure_threshold: "Gib eine ganze Zahl von 1 bis 1000 ein.",
       not_domain_controller:
         "Die Replikationsüberwachung ist nur auf einem Domänencontroller verfügbar.",
+      invalid_environment_linebreak:
+        "Diese Einstellung darf keinen Zeilenumbruch enthalten.",
     },
   },
 };

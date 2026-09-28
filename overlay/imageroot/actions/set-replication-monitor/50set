@@ -76,6 +76,15 @@ base_url = request.get("base_url", os.getenv("NTFY_REPLICATION_BASE_URL", ""))
 topic = request.get("topic", os.getenv("NTFY_REPLICATION_TOPIC", ""))
 token = request.get("token", "")
 
+for field, value in (("base_url", base_url), ("topic", topic), ("token", token)):
+    if any(char in value for char in "\r\n"):
+        validation_error(
+            field,
+            "",
+            "invalid_environment_linebreak",
+            "Environment settings cannot contain line breaks.",
+        )
+
 if enabled:
     base_url = normalize_base_url(base_url)
     if not TOPIC_PATTERN.fullmatch(topic):
