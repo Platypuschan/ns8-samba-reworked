@@ -97,7 +97,8 @@ for executable in (
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
-    *(restore / name for name in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor")),
+    repository / "scripts/release-scope.sh",
+    *(restore / name for name in ("07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor")),
 ):
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
@@ -114,6 +115,8 @@ python_files = [
     repository / "tests/test_overlay.py",
     repository / "tests/test_replication_monitor.py",
     restore / "07copy_custom_env",
+    restore / "08validate_remote_ip",
+    restore / "55rename_forced_dc",
 ]
 for path in python_files:
     compile(path.read_text(), str(path), "exec")
@@ -212,10 +215,10 @@ assert "sha256sum --check /tmp/upstream-join-domain.sha256" in containerfile
 assert "sha256sum --check /tmp/upstream-restore-state.sha256" in containerfile
 assert "COPY --from=ui-builder /usr/src/ui/dist/ /ui/" in containerfile
 
-restore_schema = json.loads((restore / "validate-input.json").read_text())
-assert restore_schema["properties"]["recovery_adminpass"]["writeOnly"] is True
-assert restore_schema["dependencies"]["recovery_adminuser"] == ["recovery_adminpass"]
+assert not (restore / "validate-input.json").exists()
 assert "remote-restore-joined" in (restore / "60resume_state").read_text()
+workflow = (repository / ".github/workflows/upstream-release.yml").read_text()
+assert './scripts/release-scope.sh "${released_sha}"' in workflow
 
 first_configuration = (
     repository
@@ -253,8 +256,9 @@ if image_root is not None:
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
     assert (image_root / "imageroot/bin/join-domain-checked").is_file()
-    for filename in ("07copy_custom_env", "40restore_timescaledb", "50attempt_remote_rejoin", "60resume_state", "85replication_monitor", "validate-input.json"):
+    for filename in ("07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor"):
         assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
+    assert not (image_root / "imageroot/actions/restore-module/validate-input.json").exists()
     assert (
         image_root
         / "imageroot/systemd/user/ad-replication-monitor.timer"

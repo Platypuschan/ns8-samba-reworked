@@ -8,6 +8,7 @@ set -euo pipefail
 marker="${AGENT_STATE_DIR:?}/remote-restore-joined"
 rm -f -- "${marker}"
 rm -f -- "${AGENT_STATE_DIR}/remote-restore-mode"
+rm -f -- "${AGENT_STATE_DIR}/remote-restore-join-attempted"
 [[ ${PROVISION_MODE:-} == join-remote-domain ]] || exit 0
 
 # The backup includes the offline domain archive, not the local DC database.
@@ -28,6 +29,10 @@ if [[ -z ${IPADDRESS:-} || -z ${HOSTNAME:-} || -z ${JOINADDRESS:-} ||
     echo 'Join prerequisites are incomplete; falling back to an independent domain backup restore.'
     exit 0
 fi
+
+# Preserve the attempted name for the fallback step. A failed join may have
+# created remote AD objects before returning a nonzero exit status.
+printf '%s\n' "${HOSTNAME}" > "${AGENT_STATE_DIR}/remote-restore-join-attempted"
 
 podman_bin=${PODMAN_BIN:-/usr/bin/podman}
 stop_joined_dc() {
@@ -88,15 +93,35 @@ fi
 # A successful join and a running DC must both be observable before the
 # offline domain archive can be skipped. The service may need a few seconds
 # to publish its DRS endpoint after its listening ports become available.
-for attempt in 1 2 3 4 5 6; do
-    if timeout 20 "${podman_bin}" exec samba-dc samba-tool drs showrepl --json \
-        | jq -e 'type == "object" and ((.repsFrom // []) | any((.["consecutive failures"] | tonumber? // 1) == 0))' >/dev/null; then
+for attempt in {1..12}; do
+    if drs_status=$(timeout 20 "${podman_bin}" exec samba-dc samba-tool drs showrepl --json) &&
+        jq -e '
+            def succeeded:
+                any(.[];
+                    ((.["consecutive failures"] | tonumber? // 1) == 0) and
+                    ((.["last success"] | tonumber? // 0) > 0) and
+                    (."is deleted" != true)
+                );
+            type == "object" and
+            ((.repsFrom // []) | succeeded)
+        ' >/dev/null <<< "${drs_status}"; then
+        if jq -e '
+            (.repsTo // []) | any(.[];
+                ((.["consecutive failures"] | tonumber? // 1) == 0) and
+                ((.["last success"] | tonumber? // 0) > 0) and
+                (."is deleted" != true)
+            )
+        ' >/dev/null <<< "${drs_status}"; then
+            echo 'The local DC reports a successful outbound DRS notification.'
+        else
+            echo 'Outbound DRS notification is not confirmed yet; check replication on the surviving DC.'
+        fi
         printf 'joined\n' > "${marker}"
         printf 'joined\n' > "${AGENT_STATE_DIR}/remote-restore-mode"
-        echo 'The restored DC joined the surviving domain and exposes a DRS connection.'
+        echo 'The restored DC joined the surviving domain and reports successful inbound replication.'
         exit 0
     fi
-    [[ ${attempt} == 6 ]] || sleep 5
+    [[ ${attempt} == 12 ]] || sleep 5
 done
 
 echo 'Joined DC has no working DRS view; forcing domain backup restore.'
