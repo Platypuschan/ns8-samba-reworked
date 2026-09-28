@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-import ipaddress
 import json
 import os
 import sys
@@ -14,7 +13,17 @@ request = json.load(sys.stdin)
 module_id = os.environ["MODULE_ID"]
 realm = request["realm"].upper()
 domain = realm.lower()
-local_address = ipaddress.ip_address(request["ipaddress"])
+
+if any(char in request["ldapservice_password"] for char in "\r\n"):
+    print("The ldapservice password cannot contain a line break.", file=sys.stderr)
+    agent.set_status("validation-failed")
+    json.dump([{
+        "field": "ldapservice_password",
+        "parameter": "ldapservice_password",
+        "value": "",
+        "error": "invalid_environment_linebreak",
+    }], sys.stdout)
+    sys.exit(2)
 
 agent.set_env("SERVER_ROLE", "dc")
 agent.set_env("PROVISION_TYPE", "join-domain")
@@ -29,13 +38,7 @@ agent.set_env("JOINADDRESS", request["joinaddress"])
 agent.set_env("SVCUSER", "ldapservice")
 agent.set_env("SVCPASS", request["ldapservice_password"])
 
-with agent.redis_connect() as rdb:
-    cluster_network = ipaddress.ip_network(rdb.get("cluster/network"), strict=False)
-
 with agent.redis_connect(privileged=True) as rdb:
-    if local_address in cluster_network:
-        agent.set_env("PREFIXLEN", str(cluster_network.prefixlen))
-        rdb.srem(f"module/{module_id}/flags", "file_server")
-    else:
-        agent.unset_env("PREFIXLEN")
-        rdb.sadd(f"module/{module_id}/flags", "file_server")
+    # 03validate_remote rejects the cluster VPN for a remote DC.
+    agent.unset_env("PREFIXLEN")
+    rdb.sadd(f"module/{module_id}/flags", "file_server")

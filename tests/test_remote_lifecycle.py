@@ -48,6 +48,71 @@ class RemoteLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(dict(call.args for call in agent.set_env.call_args_list), environment)
 
+    def test_restore_rejects_multiline_backup_before_upstream_copy(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        agent.set_env = mock.Mock()
+        for field in ("SVCPASS", "NTFY_REPLICATION_TOKEN"):
+            with self.subTest(field=field), self.assertRaises(SystemExit) as caught:
+                self.run_action(
+                    ACTIONS / "restore-module/04validate_environment",
+                    {"environment": {field: "secret\nIPADDRESS=10.5.4.1"}},
+                    {"agent": agent},
+                )
+            self.assertEqual(caught.exception.code, 2)
+        agent.set_env.assert_not_called()
+        agent.set_status.assert_called_with("validation-failed")
+
+    def test_configuration_rejects_multiline_service_password(self):
+        agent = types.ModuleType("agent")
+        agent.set_env = mock.Mock()
+        agent.set_status = mock.Mock()
+        with mock.patch.dict(os.environ, {"MODULE_ID": "samba1"}):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_action(
+                    ACTIONS / "configure-remote-domain/05set_env",
+                    {"realm": "ad.example.org", "ldapservice_password": "secret\nIPADDRESS=10.5.4.1"},
+                    {"agent": agent},
+                )
+        self.assertEqual(caught.exception.code, 2)
+        agent.set_env.assert_not_called()
+
+    def test_monitor_rejects_multiline_settings_even_when_disabled(self):
+        agent = types.ModuleType("agent")
+        agent.set_env = mock.Mock()
+        agent.set_status = mock.Mock()
+        for field in ("base_url", "topic", "token"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                with mock.patch.dict(os.environ, {"SERVER_ROLE": "dc", "AGENT_STATE_DIR": directory}, clear=True):
+                    with self.assertRaises(SystemExit) as caught:
+                        self.run_action(
+                            ACTIONS / "set-replication-monitor/50set",
+                            {"enabled": False, "failure_threshold": 2,
+                             field: "value\rIPADDRESS=10.5.4.1"},
+                            {"agent": agent},
+                        )
+                self.assertEqual(caught.exception.code, 2)
+        agent.set_env.assert_not_called()
+
+    def test_set_ipaddress_rejects_vpn_only_for_remote_dc(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        rdb = mock.MagicMock()
+        rdb.__enter__.return_value.get.return_value = "10.5.4.0/24"
+        agent.redis_connect = mock.Mock(return_value=rdb)
+        script = ACTIONS / "set-ipaddress/02validate_remote_ip"
+        payload = {"ipaddress": "10.5.4.7"}
+        with mock.patch.dict(os.environ, {"PROVISION_MODE": "join-remote-domain"}):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_action(script, payload, {"agent": agent})
+            self.assertEqual(caught.exception.code, 2)
+            self.run_action(script, {"ipaddress": "192.0.2.7"}, {"agent": agent})
+        with mock.patch.dict(os.environ, {"PROVISION_MODE": "new-domain"}):
+            self.run_action(script, payload, {"agent": agent})
+        agent.set_status.assert_called_once_with("validation-failed")
+
     def test_remote_restore_rejects_upstream_vpn_fallback(self):
         agent = types.ModuleType("agent")
         agent.set_weight = mock.Mock()

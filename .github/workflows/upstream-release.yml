@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - Containerfile
+      - .dockerignore
       - UPSTREAM_VERSION
       - CUSTOM_VERSION
       - overlay/**
@@ -36,6 +37,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Determine release target
@@ -77,12 +79,14 @@ jobs:
                 target_custom=$(python3 scripts/next-version.py "${current_custom}" --patch)
               fi
             elif git rev-parse --verify --quiet "refs/tags/v${current_custom}" >/dev/null; then
-              # A tag without a release is only safe to publish for its own commit.
-              [[ $(git rev-list -n 1 "v${current_custom}") == "$(git rev-parse HEAD)" ]] || {
-                echo "Unreleased version tag points to another revision" >&2
-                exit 1
-              }
+              echo "Tag v${current_custom} exists without a release. Reconcile its published image and release manually; refusing to overwrite the version tag." >&2
+              exit 1
             fi
+          fi
+
+          if [[ ${active} == true ]] && git rev-parse --verify --quiet "refs/tags/v${target_custom}" >/dev/null; then
+            echo "Tag v${target_custom} is already in use; refusing to overwrite its published image." >&2
+            exit 1
           fi
 
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/samba"
@@ -121,6 +125,16 @@ jobs:
           output-file: samba.spdx.json
           upload-release-assets: false
 
+      - name: Verify candidate matches current main
+        if: steps.target.outputs.active == 'true'
+        run: |
+          set -euo pipefail
+          remote_sha=$(git ls-remote origin refs/heads/main | cut -f1)
+          [[ $(git rev-parse HEAD) == "${remote_sha}" ]] || {
+            echo 'Main changed during the build; a newer run must build and test that source.' >&2
+            exit 1
+          }
+
       - name: Record tested versions
         if: >-
           steps.target.outputs.active == 'true' &&
@@ -148,6 +162,11 @@ jobs:
         id: publish
         run: |
           set -euo pipefail
+          existing_tag=$(git ls-remote origin 'refs/tags/v${{ steps.target.outputs.custom }}')
+          if [[ -n ${existing_tag} ]]; then
+            echo 'Version tag appeared during the build; refusing to overwrite its published image.' >&2
+            exit 1
+          fi
           image='${{ steps.target.outputs.image }}'
           candidate_id=$(docker image inspect --format '{{.Id}}' ns8-samba-reworked:candidate)
           for tag in '${{ steps.target.outputs.custom }}' 'upstream-${{ steps.target.outputs.upstream }}' latest; do
