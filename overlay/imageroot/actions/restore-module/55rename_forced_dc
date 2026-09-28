@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+import os
+from pathlib import Path
+
+import agent
+
+
+state = Path(os.environ["AGENT_STATE_DIR"])
+attempted = state / "remote-restore-join-attempted"
+if not attempted.exists() or (state / "remote-restore-joined").exists():
+    raise SystemExit(0)
+
+# A partial join can leave the attempted DC name in the surviving AD, even
+# when samba-tool returned failure. Give the independent backup copy another
+# identity rather than starting it with that potentially registered name.
+hostname = os.environ["HOSTNAME"]
+shortname, domain = hostname.split(".", 1)
+prefix, separator, suffix = shortname.rpartition("r")
+if separator and suffix.isdecimal():
+    suffix = str(int(suffix) + 1)
+else:
+    prefix, suffix = shortname, "1"
+new_shortname = prefix[:15 - len("r" + suffix)] + "r" + suffix
+new_hostname = new_shortname + "." + domain
+agent.set_env("HOSTNAME", new_hostname)
+print(
+    f"Join attempted as {hostname}; restoring the independent DC as "
+    f"{new_hostname}. Check the surviving domain for stale join metadata."
+)

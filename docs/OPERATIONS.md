@@ -72,19 +72,26 @@ the saved peer address, realm, service account, and password. A module-level
 restore request may supply one-time `recovery_adminuser` and
 `recovery_adminpass` for the join. The cluster restore action does not forward
 those fields; with the usual non-admin `ldapservice` account its join will
-normally fail. After join, the DC must start and report a DRS connection. On
-any failure the action stops a partially started DC, restores the offline
+normally fail. After join, the DC must start and report successful inbound
+replication. The action reports the outbound DRS notification separately,
+without treating a pending notification as a failed join. On failure it stops
+a partially started DC, restores the offline
 domain archive, and starts the independent DC. Inspect
 `state/remote-restore-mode` and the restore log to see `joined` or `forced`.
+The outbound notification does not prove that the surviving DC pulled changes;
+check `samba-tool drs showrepl` on the surviving DC after a successful join.
 
 **A forced restore can split a live domain.** Keep the two copies isolated
 until you choose which one will be authoritative. Verify authentication against
 the restored DC, then reconcile client DNS settings and any directory changes.
 A failed or partially successful join can leave a stale DC computer account
-on the original domain; check that side before trying another join. If the
-restored `IPADDRESS` is unavailable on the target node, set a usable address
-before expecting the DC to serve clients. Monitoring settings from the backup
-are retained.
+and server/NTDS Settings objects and DNS A/SRV records on the surviving
+domain. The forced copy uses another new DC name after an attempted join; it
+does not remove those objects. Check the surviving domain before another join.
+If the restored address would be empty or inside the target node's cluster
+VPN, restore fails before joining or rebuilding. Move the original address to
+the target node or use a node with a reachable non-VPN address, then retry.
+Monitoring settings from the backup are retained.
 
 During provisioning the module bind-mounts a corrected copy of the upstream
 `join-domain` script into the official Samba runtime image. This preserves

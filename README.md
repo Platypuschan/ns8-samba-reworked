@@ -216,7 +216,9 @@ must be reviewed and updated if upstream changes either replaced file.
 It queries the latest non-prerelease GitHub release of
 `NethServer/ns8-samba`. An upstream update increments the custom minor
 version. Changes to the overlay on `main` increment the patch version when
-upstream stays the same. A missing release uses the recorded version. The
+upstream stays the same. Scheduled runs compare image and build paths with
+the last release tag, so documentation-only changes do not trigger a release.
+A missing release uses the recorded version. The
 workflow then:
 
 1. downloads the matching upstream UI source and builds the customized UI;
@@ -239,8 +241,10 @@ change requires review and a deliberate hash update before a candidate builds.
 For a backup made with `PROVISION_MODE=join-remote-domain`, restore first tries
 to join a new DC to the saved `JOINADDRESS` with the saved `SVCUSER` and
 `SVCPASS`. It uses the corrected join script and requires a local AD database,
-a started DC, and a DRS connection. A successful join skips the offline domain
-archive. The restored DC receives a new name with an `rN` suffix, as in the
+a started DC, and successful inbound replication. An outbound DRS notification
+is checked and logged separately; its absence does not force a split. A
+successful join skips the offline domain archive. The restored
+DC receives a new name with an `rN` suffix, as in the
 upstream restore flow. The backup does not contain a reusable local DC database,
 so an old computer account alone cannot resume the original DC.
 
@@ -248,6 +252,8 @@ The default `ldapservice` account usually lacks DC join permission. The normal
 cluster restore does not accept a one-time domain administrator password. In
 that case, or if the join/start/DRS check fails, restore **automatically forces
 an independent domain restore** from the offline archive and starts the DC.
+After an attempted join, the forced copy receives another new DC name rather
+than reusing the name that may remain registered on the surviving DC.
 This may create two divergent copies of the same domain if another DC is still
 live. Authentication against the restored DC remains available, but changes
 made on the other copy will not automatically appear here. Decide which copy
@@ -262,8 +268,14 @@ forward these fields. The result is recorded in
 `state/remote-restore-mode` (`joined` or `forced`) and in the restore log.
 The overlay's monitoring settings, including its ntfy token, are preserved.
 If the original IP address cannot be assigned on the target node, upstream
-leaves `IPADDRESS` empty and the restored DC cannot start until an address is
-configured.
+substitutes the node's cluster VPN address. This overlay refuses remote DC
+restores before either branch starts if the resulting address is empty or in
+the cluster VPN range. Restore on a node with an available, reachable non-VPN
+address. A failed join may leave its computer account, server/NTDS Settings
+object, and DNS A/SRV records in the surviving domain; inspect and clean them
+manually before another join. Restore does not delete those remote objects.
+The local DRS view alone cannot prove that the surviving DC pulled changes
+from the new DC; check its replication status after a successful restore.
 
 ## License
 
