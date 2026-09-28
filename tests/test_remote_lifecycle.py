@@ -229,8 +229,13 @@ class RemoteLifecycleTests(unittest.TestCase):
                             request, {"agent": agent})
         self.assertEqual(agent.set_status.call_count, 2)
 
+    # samba-tool drs showrepl --json formats timestamps with nttime2string.
+    SAMBA_SUCCESS = '"Mon Sep 28 19:12:25 2026 UTC"'
+    SAMBA_NEVER = '"NTTIME(0)"'
+
     def run_remote_restore(self, join_exit=0, drs_exit=0, drs_failures=0,
-                           drs_to_failures=0, drs_to_last_success=1,
+                           drs_last_success=SAMBA_SUCCESS, drs_to_failures=0,
+                           drs_to_last_success=SAMBA_SUCCESS,
                            credentials=None, restore_audit=False):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -260,7 +265,7 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "fi\n"
                 "if [[ $* == *'--entrypoint=/bin/bash'* ]]; then exit 0; fi\n"
                 "if [[ $* == *'drs showrepl --json'* ]]; then\n"
-                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s,\"last success\":1}],\"repsTo\":[{\"consecutive failures\":%s,\"last success\":%s}]}\\n' \"$FAKE_DRS_FAILURES\" \"$FAKE_DRS_TO_FAILURES\" \"$FAKE_DRS_TO_LAST_SUCCESS\"\n"
+                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s,\"last success\":%s}],\"repsTo\":[{\"consecutive failures\":%s,\"last success\":%s}]}\\n' \"$FAKE_DRS_FAILURES\" \"$FAKE_DRS_LAST_SUCCESS\" \"$FAKE_DRS_TO_FAILURES\" \"$FAKE_DRS_TO_LAST_SUCCESS\"\n"
                 "  exit \"$FAKE_DRS_EXIT\"\n"
                 "fi\n"
                 "if [[ $* == *'--workdir=/var/lib/samba'* ]]; then\n"
@@ -289,8 +294,9 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "FAKE_JOIN_EXIT": str(join_exit),
                 "FAKE_DRS_EXIT": str(drs_exit),
                 "FAKE_DRS_FAILURES": str(drs_failures),
+                "FAKE_DRS_LAST_SUCCESS": drs_last_success,
                 "FAKE_DRS_TO_FAILURES": str(drs_to_failures),
-                "FAKE_DRS_TO_LAST_SUCCESS": str(drs_to_last_success),
+                "FAKE_DRS_TO_LAST_SUCCESS": drs_to_last_success,
                 "AGENT_STATE_DIR": str(work),
                 "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot"),
                 "PROVISION_MODE": "join-remote-domain",
@@ -371,8 +377,15 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertIn("systemctl --user stop samba-dc.service", calls)
         self.assertIn("samba-tool domain backup restore", calls)
 
+    def test_remote_restore_forces_domain_backup_without_inbound_success(self):
+        calls, mode, _, _, hostname = self.run_remote_restore(drs_last_success=self.SAMBA_NEVER)
+        self.assertEqual(mode, "forced\n")
+        self.assertEqual(hostname, "dc2r2.ad.example.org")
+        self.assertIn("samba-tool domain backup restore", calls)
+
     def test_remote_restore_warns_if_outbound_status_is_not_yet_confirmed(self):
-        calls, mode, _, logs, hostname = self.run_remote_restore(drs_to_last_success=0)
+        calls, mode, _, logs, hostname = self.run_remote_restore(
+            drs_to_last_success=self.SAMBA_NEVER)
         self.assertEqual(mode, "joined\n")
         self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertNotIn("samba-tool domain backup restore", calls)

@@ -95,25 +95,28 @@ fi
 # A successful join and a running DC must both be observable before the
 # offline domain archive can be skipped. The service may need a few seconds
 # to publish its DRS endpoint after its listening ports become available.
+# The join itself writes no repsFrom entries on the new DC, so a successful
+# entry proves that the running DC pulled from its partner. samba-tool
+# reports "last success" as a date string, or "NTTIME(0)" if it never
+# succeeded.
+drs_succeeded='
+    def succeeded:
+        any(.[];
+            ((.["consecutive failures"] | tonumber? // 1) == 0) and
+            (.["last success"] as $last |
+                if ($last | type) == "number" then $last > 0
+                elif ($last | type) == "string" then
+                    $last != "" and $last != "NTTIME(0)" and (($last | tonumber? // 1) > 0)
+                else false end) and
+            (."is deleted" != true)
+        );
+'
 for attempt in {1..12}; do
     if drs_status=$(timeout 20 "${podman_bin}" exec samba-dc samba-tool drs showrepl --json) &&
-        jq -e '
-            def succeeded:
-                any(.[];
-                    ((.["consecutive failures"] | tonumber? // 1) == 0) and
-                    ((.["last success"] | tonumber? // 0) > 0) and
-                    (."is deleted" != true)
-                );
-            type == "object" and
-            ((.repsFrom // []) | succeeded)
+        jq -e "${drs_succeeded}"'
+            type == "object" and ((.repsFrom // []) | succeeded)
         ' >/dev/null <<< "${drs_status}"; then
-        if jq -e '
-            (.repsTo // []) | any(.[];
-                ((.["consecutive failures"] | tonumber? // 1) == 0) and
-                ((.["last success"] | tonumber? // 0) > 0) and
-                (."is deleted" != true)
-            )
-        ' >/dev/null <<< "${drs_status}"; then
+        if jq -e "${drs_succeeded}"'(.repsTo // []) | succeeded' >/dev/null <<< "${drs_status}"; then
             echo 'The local DC reports a successful outbound DRS notification.'
         else
             echo 'Outbound DRS notification is not confirmed yet; check replication on the surviving DC.'

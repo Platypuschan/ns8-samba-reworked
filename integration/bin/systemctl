@@ -54,12 +54,20 @@ start_samba_dc() {
         --volume=homes:/srv/homes \
         "${init[@]}" \
         "${SAMBA_DC_IMAGE:?}" >/dev/null
-    # ExecStartPost: DNS, Kerberos, LDAP and global catalog must accept TCP.
+    # ExecStartPost: DNS, Kerberos, LDAP and global catalog must accept TCP
+    # within systemd's default start timeout of 90 seconds.
+    local deadline=$((SECONDS + 90))
     for port in 53 88 389 3268; do
         until (exec 3<>"/dev/tcp/${IPADDRESS}/${port}") 2>/dev/null; do
             if [[ $(/usr/bin/podman container inspect -f '{{.State.Running}}' samba-dc 2>/dev/null) != true ]]; then
                 printf 'samba-dc exited during startup\n' >&2
-                /usr/bin/podman logs --tail 50 samba-dc >&2 || true
+                /usr/bin/podman logs --tail 80 samba-dc >&2 || true
+                return 1
+            fi
+            if ((SECONDS >= deadline)); then
+                printf 'samba-dc start timed out waiting for port %s\n' "${port}" >&2
+                /usr/bin/podman logs --tail 80 samba-dc >&2 || true
+                /usr/bin/podman stop --ignore -t 10 samba-dc >/dev/null || true
                 return 1
             fi
             sleep 2

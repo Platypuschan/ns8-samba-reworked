@@ -349,6 +349,9 @@ receiver_pid=
 
 #######################################################################
 section "Backup DC B like module-dump-state"
+# Restore with Samba's default KCC/DRS timing, as on a real node.
+podman run --rm --volume=config:/etc/samba:z --entrypoint=/bin/bash "${image}" -c \
+    'sed -i "/periodic_interval/d" /etc/samba/include.conf'
 on_b bash -c 'cd /var/lib/samba && rm -rf backup && samba-tool domain backup offline --targetdir=backup &&
     mv backup/samba-backup-*.tar.bz2 backup/samba-backup.tar.bz2' > "${out}/backup.log" 2>&1
 check "Offline domain backup of DC B" test $? -eq 0
