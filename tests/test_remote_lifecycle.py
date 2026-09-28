@@ -48,8 +48,37 @@ class RemoteLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(dict(call.args for call in agent.set_env.call_args_list), environment)
 
-    def run_remote_restore(self, join_exit=0, drs_exit=0, drs_failures=0, credentials=None,
-                           restore_audit=False):
+    def test_remote_restore_rejects_upstream_vpn_fallback(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        rdb = mock.MagicMock()
+        rdb.__enter__.return_value.get.return_value = "10.5.4.0/24"
+        agent.redis_connect = mock.Mock(return_value=rdb)
+        request = {"environment": {"PROVISION_MODE": "join-remote-domain"}}
+        with mock.patch.dict(os.environ, {"IPADDRESS": "10.5.4.7"}):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_action(
+                    ACTIONS / "restore-module/08validate_remote_ip", request,
+                    {"agent": agent},
+                )
+        self.assertEqual(caught.exception.code, 2)
+        agent.set_status.assert_called_once_with("validation-failed")
+
+        with mock.patch.dict(os.environ, {"IPADDRESS": ""}):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_action(ACTIONS / "restore-module/08validate_remote_ip",
+                                request, {"agent": agent})
+        self.assertEqual(caught.exception.code, 2)
+
+        with mock.patch.dict(os.environ, {"IPADDRESS": "192.0.2.4"}):
+            self.run_action(ACTIONS / "restore-module/08validate_remote_ip",
+                            request, {"agent": agent})
+        self.assertEqual(agent.set_status.call_count, 2)
+
+    def run_remote_restore(self, join_exit=0, drs_exit=0, drs_failures=0,
+                           drs_to_failures=0, drs_to_last_success=1,
+                           credentials=None, restore_audit=False):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             bin_dir = work / "bin"
@@ -77,7 +106,7 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "fi\n"
                 "if [[ $* == *'--entrypoint=/bin/bash'* ]]; then exit 0; fi\n"
                 "if [[ $* == *'drs showrepl --json'* ]]; then\n"
-                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s}]}\\n' \"$FAKE_DRS_FAILURES\"\n"
+                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s,\"last success\":1}],\"repsTo\":[{\"consecutive failures\":%s,\"last success\":%s}]}\\n' \"$FAKE_DRS_FAILURES\" \"$FAKE_DRS_TO_FAILURES\" \"$FAKE_DRS_TO_LAST_SUCCESS\"\n"
                 "  exit \"$FAKE_DRS_EXIT\"\n"
                 "fi\n"
                 "if [[ $* == *'--workdir=/var/lib/samba'* ]]; then\n"
@@ -106,6 +135,8 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "FAKE_JOIN_EXIT": str(join_exit),
                 "FAKE_DRS_EXIT": str(drs_exit),
                 "FAKE_DRS_FAILURES": str(drs_failures),
+                "FAKE_DRS_TO_FAILURES": str(drs_to_failures),
+                "FAKE_DRS_TO_LAST_SUCCESS": str(drs_to_last_success),
                 "AGENT_STATE_DIR": str(work),
                 "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot"),
                 "PROVISION_MODE": "join-remote-domain",
@@ -133,20 +164,35 @@ class RemoteLifecycleTests(unittest.TestCase):
                 cwd=work, env=environment, check=False,
             )
             self.assertEqual(join.returncode, 0, join.stderr)
+            agent = types.ModuleType("agent")
+            agent.set_env = mock.Mock(
+                side_effect=lambda name, value: environment.__setitem__(name, value)
+            )
+            with mock.patch.dict(os.environ, environment):
+                try:
+                    rename_log = self.run_action(
+                        ACTIONS / "restore-module/55rename_forced_dc", {},
+                        {"agent": agent},
+                    )
+                except SystemExit as caught:
+                    self.assertEqual(caught.code, 0)
+                    rename_log = ""
             restore = subprocess.run(
                 ["bash", str(ACTIONS / "restore-module/60resume_state")],
                 text=True, capture_output=True, cwd=work, env=environment, check=False,
             )
             self.assertEqual(restore.returncode, 0, restore.stderr)
             return (calls.read_text(), (work / "remote-restore-mode").read_text(),
-                    (work / "creds").read_text(), join.stderr + restore.stderr)
+                    (work / "creds").read_text(), join.stderr + rename_log + restore.stderr,
+                    environment["HOSTNAME"])
 
     def test_remote_restore_rejoins_when_domain_and_credentials_work(self):
-        calls, mode, credentials, logs = self.run_remote_restore(restore_audit=True, credentials={
+        calls, mode, credentials, logs, hostname = self.run_remote_restore(restore_audit=True, credentials={
             "recovery_adminuser": "Administrator", "recovery_adminpass": "once-only",
         })
         self.assertEqual(mode, "joined\n")
         self.assertEqual(credentials, "Administrator\tonce-only")
+        self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertIn("drs showrepl --json", calls)
         self.assertNotIn("samba-tool domain backup restore", calls)
         self.assertNotIn("once-only", logs)
@@ -154,18 +200,28 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertEqual(calls.count("--name=timescaledb"), 1)
 
     def test_remote_restore_forces_domain_backup_after_join_failure(self):
-        calls, mode, credentials, logs = self.run_remote_restore(join_exit=34)
+        calls, mode, credentials, logs, hostname = self.run_remote_restore(join_exit=34)
         self.assertEqual(mode, "forced\n")
         self.assertEqual(credentials, "ldapservice\tsaved-service-secret")
         self.assertIn("samba-tool domain backup restore", calls)
+        self.assertEqual(hostname, "dc2r2.ad.example.org")
+        self.assertIn("--hostname=dc2r2.ad.example.org", calls)
         self.assertIn("FORCED RESTORE", logs)
         self.assertNotIn("saved-service-secret", logs)
 
     def test_remote_restore_forces_domain_backup_after_drs_failure(self):
-        calls, mode, _, _ = self.run_remote_restore(drs_failures=3)
+        calls, mode, _, _, hostname = self.run_remote_restore(drs_failures=3)
         self.assertEqual(mode, "forced\n")
+        self.assertEqual(hostname, "dc2r2.ad.example.org")
         self.assertIn("systemctl --user stop samba-dc.service", calls)
         self.assertIn("samba-tool domain backup restore", calls)
+
+    def test_remote_restore_warns_if_outbound_status_is_not_yet_confirmed(self):
+        calls, mode, _, logs, hostname = self.run_remote_restore(drs_to_last_success=0)
+        self.assertEqual(mode, "joined\n")
+        self.assertEqual(hostname, "dc2r1.ad.example.org")
+        self.assertNotIn("samba-tool domain backup restore", calls)
+        self.assertIn("Outbound DRS notification is not confirmed", logs)
 
     def test_cli_rejects_cluster_vpn_dc_address(self):
         agent = types.ModuleType("agent")

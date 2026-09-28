@@ -71,7 +71,7 @@ jobs:
           if [[ ${upstream_changed} == false ]]; then
             if [[ ${release_exists} == true ]]; then
               released_sha=$(git rev-list -n 1 "v${current_custom}")
-              if [[ ${released_sha} == "$(git rev-parse HEAD)" ]]; then
+              if [[ $(./scripts/release-scope.sh "${released_sha}") == false ]]; then
                 active=false
               else
                 target_custom=$(python3 scripts/next-version.py "${current_custom}" --patch)
