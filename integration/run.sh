@@ -410,6 +410,15 @@ on_b samba-tool user create itest-after-rejoin "${user_pass}" >/dev/null
 check "User created on the rejoined DC replicates to DC A" poll 300 user_exists dc1 itest-after-rejoin
 check "DC A replicates with the rejoined DC without failures" poll 420 replication_clean dc1
 showrepl samba-dc > "${out}/showrepl-dc2-rejoined.json"
+showrepl dc1 > "${out}/showrepl-dc1-after-rejoin.json" 2>&1
+podman logs --tail 300 dc1 > "${out}/dc1-after-rejoin.log" 2>&1
+# Ask DC A to pull from the rejoined DC now and record Samba's answer.
+if on_a samba-tool drs replicate dc1 dc2 "${basedn}" > "${out}/dc1-pull-from-dc2.txt" 2>&1; then
+    info "DC A can pull from the rejoined DC on request"
+else
+    info "DC A cannot pull from the rejoined DC: $(tail -n 1 "${out}/dc1-pull-from-dc2.txt")"
+fi
+info "DC A inbound view after rejoin: $(jq -c '[.repsFrom[]? | {DSA, guid: .["DSA objectGUID"], deleted: .["is deleted"], fails: .["consecutive failures"], msg: .["last attempt message"]}] | unique' "${out}/showrepl-dc1-after-rejoin.json" 2>/dev/null)"
 
 #######################################################################
 section "Test 5: restore DC B while DC A is down (forced)"
