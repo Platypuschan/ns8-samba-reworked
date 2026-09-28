@@ -14,7 +14,8 @@ nameserver ${JOINADDRESS:?}
 EOF
 
 rm -f /etc/samba/smb.conf
-IFS=$'\t' read -r adminuser adminpass < <(echo -n "${ADMINCREDS}" | base64 -d ; echo)
+adminuser=$(printf '%s' "${ADMINUSER_B64:?}" | base64 -d)
+adminpass=$(printf '%s' "${ADMINPASS_B64:?}" | base64 -d)
 kinit "${adminuser}" <<<"${adminpass}" || exit 33
 tmpout=$(mktemp)
 trap 'kdestroy ; rm -f "${tmpout}"' EXIT
