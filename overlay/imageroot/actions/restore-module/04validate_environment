@@ -10,7 +10,8 @@ import agent
 
 
 agent.set_weight(os.path.basename(__file__), 0)
-environment = json.load(sys.stdin)["environment"]
+request = json.load(sys.stdin)
+environment = request["environment"]
 for key, value in environment.items():
     if any(char in key or char in value for char in "\r\n"):
         print("Backup environment contains a line break and cannot be restored.",
@@ -23,3 +24,39 @@ for key, value in environment.items():
             "error": "invalid_environment_linebreak",
         }], sys.stdout)
         sys.exit(2)
+
+
+def reject_credential(field, error, message):
+    print(message, file=sys.stderr)
+    agent.set_status("validation-failed")
+    json.dump([{
+        "field": field,
+        "parameter": field,
+        "value": "",
+        "error": error,
+    }], sys.stdout)
+    sys.exit(2)
+
+
+# The standard cluster restore omits these optional fields. A direct restore
+# must supply both, in a form that survives the line-oriented join step.
+credential_fields = ("recovery_adminuser", "recovery_adminpass")
+for field in credential_fields:
+    if field not in request:
+        continue
+    value = request[field]
+    if not isinstance(value, str):
+        reject_credential(field, "invalid_recovery_credentials",
+                          "Recovery credentials must be strings.")
+    if any(char in value for char in "\r\n"):
+        reject_credential(field, "invalid_join_credentials_linebreak",
+                          "Recovery credentials cannot contain line breaks.")
+    if "\x00" in value or (field == "recovery_adminuser" and "\t" in value):
+        reject_credential(field, "invalid_join_credentials_control_character",
+                          "Recovery credentials contain an unsupported control character.")
+
+if any(field in request for field in credential_fields):
+    for field in credential_fields:
+        if not request.get(field):
+            reject_credential(field, "invalid_recovery_credentials",
+                              "Supply both nonempty recovery credentials or omit both.")
