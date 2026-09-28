@@ -27,6 +27,11 @@ fi
 start_samba_dc() {
     # ExecCondition of the upstream unit
     [[ -n ${IPADDRESS:-} ]] || return 0
+    # conmon inherits the descriptors of "podman run --detach". Keep them off
+    # the caller's pipes, or a caller piping into tee never sees EOF.
+    local errors
+    errors=$(mktemp)
+    trap 'rm -f "${errors}"' RETURN
     init=()
     if [[ -x /usr/libexec/podman/catatonit || -x /usr/bin/catatonit ]]; then
         init=(--init)
@@ -53,7 +58,10 @@ start_samba_dc() {
         --volume=shares:/srv/shares \
         --volume=homes:/srv/homes \
         "${init[@]}" \
-        "${SAMBA_DC_IMAGE:?}" >/dev/null
+        "${SAMBA_DC_IMAGE:?}" </dev/null >/dev/null 2>"${errors}" || {
+        cat "${errors}" >&2
+        return 1
+    }
     # ExecStartPost: DNS, Kerberos, LDAP and global catalog must accept TCP
     # within systemd's default start timeout of 90 seconds.
     local deadline=$((SECONDS + 90))
