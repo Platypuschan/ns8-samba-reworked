@@ -63,9 +63,11 @@ on_b() { podman exec samba-dc "$@"; }
 
 # Run one module action step as the NS8 agent would: in the state directory,
 # with the current module environment loaded. Stdout goes to $2, stderr to
-# the step log.
+# the step log. Output goes through files, not pipes: a container started by
+# a step must not keep the harness waiting for EOF.
 run_step() {
-    local step=$1 stdout_file=$2 input=$3
+    local step=$1 stdout_file=$2 input=$3 step_log code
+    step_log=$(mktemp)
     (
         cd "${state}" || exit 99
         set -a
@@ -76,8 +78,16 @@ run_step() {
             SAMBA_DC_IMAGE=${image} PODMAN_BIN=${repo_root}/integration/bin/podman \
             PYTHONPATH=${repo_root}/integration/lib \
             PATH=${repo_root}/integration/bin:${PATH}
-        printf '%s' "${input}" | "${step}"
-    ) >"${stdout_file}" 2> >(tee -a "${out}/steps.log" >&2)
+        printf '%s' "${input}" | timeout --kill-after=10 600 "${step}"
+    ) >"${stdout_file}" 2>"${step_log}"
+    code=$?
+    if [[ ${code} == 124 || ${code} == 137 ]]; then
+        { printf 'TIMEOUT: %s\n' "${step##*/}"; ps -ef --forest; } >> "${step_log}"
+    fi
+    cat "${step_log}" >> "${out}/steps.log"
+    cat "${step_log}" >&2
+    rm -f "${step_log}"
+    return "${code}"
 }
 
 env_value() { sed -n "s/^$1=//p" "${state}/environment" | tail -n 1; }
@@ -389,8 +399,10 @@ restore_b() {
 
 #######################################################################
 section "Test 4: restore DC B while DC A is alive (rejoin)"
-restore_b "${admin_pass}" 2>&1 | tee "${out}/restore-rejoin.log"
-check "Rejoin restore steps complete" test "${PIPESTATUS[0]}" -eq 0
+restore_b "${admin_pass}" > "${out}/restore-rejoin.log" 2>&1
+code=$?
+cat "${out}/restore-rejoin.log"
+check "Rejoin restore steps complete (exit ${code})" test "${code}" -eq 0
 check "Restore mode is 'joined'" grep -qx joined "${state}/remote-restore-mode"
 check "Rejoined DC keeps its hostname" bash -c "[[ $(env_value HOSTNAME) == dc2.${domain} ]]"
 check "Rejoined DC received a user created after the backup" poll 300 user_exists samba-dc itest-after-backup
@@ -402,8 +414,10 @@ showrepl samba-dc > "${out}/showrepl-dc2-rejoined.json"
 #######################################################################
 section "Test 5: restore DC B while DC A is down (forced)"
 podman stop -t 10 dc1 >/dev/null
-restore_b 2>&1 | tee "${out}/restore-forced.log"
-check "Forced restore steps complete" test "${PIPESTATUS[0]}" -eq 0
+restore_b > "${out}/restore-forced.log" 2>&1
+code=$?
+cat "${out}/restore-forced.log"
+check "Forced restore steps complete (exit ${code})" test "${code}" -eq 0
 check "Restore mode is 'forced'" grep -qx forced "${state}/remote-restore-mode"
 check "Forced restore renames the DC to dc2r1" bash -c "[[ $(env_value HOSTNAME) == dc2r1.${domain} ]]"
 check "Forced DC is running" "${repo_root}/integration/bin/systemctl" --user is-active --quiet samba-dc.service
