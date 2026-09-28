@@ -149,6 +149,17 @@ def format_failure_message(failures, threshold):
     return "\n".join(lines).strip()
 
 
+def configured_threshold():
+    raw = os.getenv("NTFY_REPLICATION_FAILURE_THRESHOLD", "3")
+    try:
+        threshold = int(raw)
+    except ValueError:
+        threshold = 0
+    if 1 <= threshold <= 1000:
+        return threshold, None
+    return 3, f"Invalid AD replication failure threshold {raw!r}; using 3."
+
+
 def main():
     if (
         os.getenv("SERVER_ROLE") != "dc"
@@ -156,8 +167,18 @@ def main():
     ):
         return 0
 
-    threshold = int(os.getenv("NTFY_REPLICATION_FAILURE_THRESHOLD", "3"))
+    threshold, configuration_error = configured_threshold()
     state = load_state()
+    if configuration_error:
+        print(configuration_error, file=sys.stderr)
+        if not state.get("configuration_alert_sent", False):
+            try:
+                send_ntfy("AD replication monitor configuration invalid", configuration_error)
+                state["configuration_alert_sent"] = True
+            except Exception as exception:
+                print(f"Unable to send ntfy notification: {exception}", file=sys.stderr)
+    else:
+        state["configuration_alert_sent"] = False
 
     try:
         result = subprocess.run(
