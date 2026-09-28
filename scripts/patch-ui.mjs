@@ -82,6 +82,8 @@ const translations = {
         "The ldapservice password cannot contain a line break.",
       invalid_join_credentials_linebreak:
         "Domain join credentials cannot contain a line break.",
+      invalid_join_credentials_control_character:
+        "The domain join user name cannot contain a tab, and credentials cannot contain a NUL character.",
       remote_dc_dns_check_failed:
         "The existing domain controller did not answer the required AD DNS lookup.",
       hostname_check_failed:
@@ -164,6 +166,8 @@ const translations = {
         "Das ldapservice-Passwort darf keinen Zeilenumbruch enthalten.",
       invalid_join_credentials_linebreak:
         "Die Zugangsdaten für den Domänenbeitritt dürfen keinen Zeilenumbruch enthalten.",
+      invalid_join_credentials_control_character:
+        "Der Benutzername für den Domänenbeitritt darf keinen Tabulator und die Zugangsdaten dürfen kein NUL-Zeichen enthalten.",
       remote_dc_dns_check_failed:
         "Der vorhandene Domänencontroller hat die erforderliche AD-DNS-Abfrage nicht beantwortet.",
       hostname_check_failed:

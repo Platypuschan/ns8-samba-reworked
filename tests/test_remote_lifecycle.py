@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import contextlib
+import base64
 import io
 import json
 import os
@@ -64,6 +65,50 @@ class RemoteLifecycleTests(unittest.TestCase):
         agent.set_env.assert_not_called()
         agent.set_status.assert_called_with("validation-failed")
 
+    def test_restore_rejects_malformed_one_time_credentials_before_copy(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        agent.set_env = mock.Mock()
+        valid = {"environment": {"PROVISION_MODE": "join-remote-domain"},
+                 "recovery_adminuser": "Administrator", "recovery_adminpass": "secret"}
+        cases = (
+            ("recovery_adminuser", "Admin\nistrator", "invalid_join_credentials_linebreak"),
+            ("recovery_adminpass", "secret\rmore", "invalid_join_credentials_linebreak"),
+            ("recovery_adminuser", "Admin\tistrator", "invalid_join_credentials_control_character"),
+            ("recovery_adminpass", "secret\x00more", "invalid_join_credentials_control_character"),
+            ("recovery_adminpass", "", "invalid_recovery_credentials"),
+            ("recovery_adminuser", 42, "invalid_recovery_credentials"),
+        )
+        for field, value, code in cases:
+            with self.subTest(field=field, value=repr(value)):
+                output = io.StringIO()
+                with mock.patch.dict(sys.modules, {"agent": agent}), mock.patch.object(
+                    sys, "stdin", io.StringIO(json.dumps({**valid, field: value}))
+                ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        runpy.run_path(str(ACTIONS / "restore-module/04validate_environment"),
+                                       run_name="__main__")
+                self.assertEqual(caught.exception.code, 2)
+                error = json.loads(output.getvalue())[0]
+                self.assertEqual((error["field"], error["error"], error["value"]),
+                                 (field, code, ""))
+                if value:
+                    self.assertNotIn(str(value), output.getvalue())
+        for missing in ("recovery_adminuser", "recovery_adminpass"):
+            with self.subTest(missing=missing):
+                payload = {key: value for key, value in valid.items() if key != missing}
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_action(ACTIONS / "restore-module/04validate_environment",
+                                    payload, {"agent": agent})
+                self.assertEqual(caught.exception.code, 2)
+        agent.set_env.assert_not_called()
+        agent.set_status.assert_called_with("validation-failed")
+        self.run_action(ACTIONS / "restore-module/04validate_environment",
+                        {"environment": valid["environment"]}, {"agent": agent})
+        self.run_action(ACTIONS / "restore-module/04validate_environment",
+                        {**valid, "recovery_adminpass": "\tsecret\t"}, {"agent": agent})
+
     def test_configuration_rejects_multiline_service_password(self):
         agent = types.ModuleType("agent")
         agent.set_env = mock.Mock()
@@ -102,6 +147,24 @@ class RemoteLifecycleTests(unittest.TestCase):
         agent.set_status.assert_called_with("validation-failed")
         self.run_action(ACTIONS / "configure-remote-domain/01validate_credentials",
                         payload, {"agent": agent})
+        for field, value in (("adminuser", "Admin\tother"),
+                             ("adminuser", "Admin\x00other"),
+                             ("adminpass", "secret\x00more")):
+            with self.subTest(field=field, value=repr(value)):
+                output = io.StringIO()
+                with mock.patch.dict(sys.modules, {"agent": agent}), mock.patch.object(
+                    sys, "stdin", io.StringIO(json.dumps({**payload, field: value}))
+                ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        runpy.run_path(str(ACTIONS / "configure-remote-domain/01validate_credentials"),
+                                       run_name="__main__")
+                self.assertEqual(caught.exception.code, 2)
+                error = json.loads(output.getvalue())[0]
+                self.assertEqual((error["field"], error["error"], error["value"]),
+                                 (field, "invalid_join_credentials_control_character", ""))
+                self.assertNotIn(value, output.getvalue())
+        self.run_action(ACTIONS / "configure-remote-domain/01validate_credentials",
+                        {**payload, "adminpass": "\tsecret\t"}, {"agent": agent})
 
     def test_monitor_rejects_multiline_settings_even_when_disabled(self):
         agent = types.ModuleType("agent")
@@ -189,7 +252,8 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "if [[ $* == *'/run/join-domain-checked'* ]]; then\n"
                 "  for argument; do\n"
                 "    if [[ $argument == --env-file=* ]]; then\n"
-                "      sed -n 's/^ADMINCREDS=//p' \"${argument#*=}\" | base64 -d > \"$FAKE_CREDS\"\n"
+                "      sed -n 's/^ADMINUSER_B64=//p' \"${argument#*=}\" | base64 -d > \"$FAKE_CREDS.user\"\n"
+                "      sed -n 's/^ADMINPASS_B64=//p' \"${argument#*=}\" | base64 -d > \"$FAKE_CREDS.pass\"\n"
                 "    fi\n"
                 "  done\n"
                 "  exit \"$FAKE_JOIN_EXIT\"\n"
@@ -273,7 +337,8 @@ class RemoteLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(restore.returncode, 0, restore.stderr)
             return (calls.read_text(), (work / "remote-restore-mode").read_text(),
-                    (work / "creds").read_text(), join.stderr + rename_log + restore.stderr,
+                    ((work / "creds.user").read_text(), (work / "creds.pass").read_text()),
+                    join.stderr + rename_log + restore.stderr,
                     environment["HOSTNAME"])
 
     def test_remote_restore_rejoins_when_domain_and_credentials_work(self):
@@ -281,7 +346,7 @@ class RemoteLifecycleTests(unittest.TestCase):
             "recovery_adminuser": "Administrator", "recovery_adminpass": "once-only",
         })
         self.assertEqual(mode, "joined\n")
-        self.assertEqual(credentials, "Administrator\tonce-only")
+        self.assertEqual(credentials, ("Administrator", "once-only"))
         self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertIn("drs showrepl --json", calls)
         self.assertNotIn("samba-tool domain backup restore", calls)
@@ -292,7 +357,7 @@ class RemoteLifecycleTests(unittest.TestCase):
     def test_remote_restore_forces_domain_backup_after_join_failure(self):
         calls, mode, credentials, logs, hostname = self.run_remote_restore(join_exit=34)
         self.assertEqual(mode, "forced\n")
-        self.assertEqual(credentials, "ldapservice\tsaved-service-secret")
+        self.assertEqual(credentials, ("ldapservice", "saved-service-secret"))
         self.assertIn("samba-tool domain backup restore", calls)
         self.assertEqual(hostname, "dc2r2.ad.example.org")
         self.assertIn("--hostname=dc2r2.ad.example.org", calls)
@@ -312,6 +377,13 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertNotIn("samba-tool domain backup restore", calls)
         self.assertIn("Outbound DRS notification is not confirmed", logs)
+
+    def test_remote_restore_preserves_password_tabs(self):
+        _, mode, credentials, _, _ = self.run_remote_restore(credentials={
+            "recovery_adminuser": "Administrator", "recovery_adminpass": "\tsecret\t",
+        })
+        self.assertEqual(mode, "joined\n")
+        self.assertEqual(credentials, ("Administrator", "\tsecret\t"))
 
     def test_cli_rejects_cluster_vpn_dc_address(self):
         agent = types.ModuleType("agent")
@@ -388,6 +460,37 @@ class RemoteLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("IPADDRESS=192.0.2.4", environment_file.read_text())
+
+    def test_initial_join_preserves_password_tabs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            fake_podman = work / "podman"
+            fake_podman.write_text(
+                "#!/bin/bash\n"
+                "for argument; do\n"
+                "  if [[ $argument == --env-file=* ]]; then\n"
+                "    cp \"${argument#*=}\" \"$FAKE_ENV_FILE\"\n"
+                "  fi\n"
+                "done\n"
+                "exit 1\n"
+            )
+            fake_podman.chmod(0o755)
+            (work / "environment").write_text("IPADDRESS=192.0.2.4\n")
+            stored = work / "join.env"
+            result = subprocess.run(
+                ["bash", str(ACTIONS / "configure-remote-domain/40start_provisioning")],
+                input=json.dumps({"adminuser": "Administrator", "adminpass": "\tsecret\t"}),
+                text=True, capture_output=True, cwd=work, check=False,
+                env={**os.environ, "PODMAN_BIN": str(fake_podman),
+                     "FAKE_ENV_FILE": str(stored), "PROVISION_TYPE": "join-domain",
+                     "JOINADDRESS": "192.0.2.3", "HOSTNAME": "dc2.example.org",
+                     "SAMBA_DC_IMAGE": "samba:test", "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot")},
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            values = dict(line.split("=", 1) for line in stored.read_text().splitlines())
+            self.assertEqual(base64.b64decode(values["ADMINUSER_B64"]).decode(), "Administrator")
+            self.assertEqual(base64.b64decode(values["ADMINPASS_B64"]).decode(), "\tsecret\t")
+            self.assertNotIn("secret", stored.read_text())
 
 
 if __name__ == "__main__":

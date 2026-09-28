@@ -52,8 +52,10 @@ trap 'rm -f -- "${tmpenv}"' EXIT
 chmod 0600 "${tmpenv}"
 (
     printf 'JOINADDRESS=%s\n' "${JOINADDRESS}"
-    printf 'ADMINCREDS='
-    printf '%s\t%s' "${credentials[0]}" "${credentials[1]}" | base64 --wrap=0
+    printf 'ADMINUSER_B64='
+    printf '%s' "${credentials[0]}" | base64 --wrap=0
+    printf '\nADMINPASS_B64='
+    printf '%s' "${credentials[1]}" | base64 --wrap=0
     printf '\n'
 ) > "${tmpenv}"
 unset credentials

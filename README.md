@@ -290,8 +290,11 @@ An administrator orchestrating the module-level `restore-module` action
 directly may pass `recovery_adminuser` and `recovery_adminpass` in its request
 alongside the usual backup repository, path, snapshot, and environment fields.
 These credentials are used only for the join attempt and are not written to
-the module environment or backup. The standard cluster restore does not
-forward these fields. The result is recorded in
+the module environment or backup. Supply both values or omit both: malformed
+one-time credentials (including line breaks or a tab in the user name) stop
+the restore before it copies the backup or attempts a join. Passwords with
+tabs are passed intact. The standard cluster restore does not forward these
+fields. The result is recorded in
 `state/remote-restore-mode` (`joined` or `forced`) and in the restore log.
 The overlay's monitoring settings, including its ntfy token, are preserved.
 If the original IP address cannot be assigned on the target node, upstream

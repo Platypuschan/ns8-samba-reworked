@@ -71,7 +71,10 @@ For `PROVISION_MODE=join-remote-domain`, the module attempts a fresh join using
 the saved peer address, realm, service account, and password. A module-level
 restore request may supply one-time `recovery_adminuser` and
 `recovery_adminpass` for the join. The cluster restore action does not forward
-those fields; with the usual non-admin `ldapservice` account its join will
+those fields. A direct restore must supply both nonempty values or omit both;
+malformed credentials fail validation before the restore copies backup data.
+Passwords with tabs are supported, while user names with tabs are rejected.
+With the usual non-admin `ldapservice` account its join will
 normally fail. After join, the DC must start and report successful inbound
 replication. The action reports the outbound DRS notification separately,
 without treating a pending notification as a failed join. On failure it stops
