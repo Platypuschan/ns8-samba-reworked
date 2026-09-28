@@ -335,25 +335,37 @@ on_b samba-tool user create itest-during-outage "${user_pass}" >/dev/null
 check "DC B reports repeated inbound failures while DC A is down" poll 420 inbound_failures_at_least 2
 showrepl samba-dc > "${out}/showrepl-dc2-outage.json"
 run_monitor
-check "Monitor sends one replication alert after the threshold" \
-    bash -c "[[ $(ntfy_count) == 1 ]] && jq -e 'select(.title | startswith(\"AD replication failed on dc2\"))
-        | select(.authorization == \"Bearer itest-token\" and .path == \"/samba%20it\")' '${out}/ntfy.jsonl'"
+check "Monitor alerts after the threshold with topic and token" \
+    bash -c "[[ $(ntfy_count) -ge 1 ]] && jq -se 'map(select(.title | startswith(\"AD replication failed on dc2\")))
+        | length >= 1 and all(.authorization == \"Bearer itest-token\" and .path == \"/samba%20it\")' '${out}/ntfy.jsonl'"
+# Samba counts failures per naming context, so further connections may reach
+# the threshold in later runs. None may be reported twice.
 run_monitor
-check "Monitor does not repeat the alert for the same failures" bash -c "[[ $(ntfy_count) == 1 ]]"
+run_monitor
+alerted_connections() {
+    jq -r 'select(.title | startswith("AD replication failed")) | .body' "${out}/ntfy.jsonl" |
+        awk '/^(inbound|outbound): /{d=$0} /^Naming context: /{print d " | " $0}'
+}
+no_repeated_alerts() { [[ -z $(alerted_connections | sort | uniq -d) ]]; }
+check "Monitor never repeats an alert for the same connection" no_repeated_alerts
+replication_alerts=$(jq -s 'map(select(.title | startswith("AD replication failed"))) | length' "${out}/ntfy.jsonl")
+info "Replication alerts for one DC outage: ${replication_alerts} message(s), $(alerted_connections | wc -l) connection(s)"
 
+before=$(ntfy_count)
 podman pause samba-dc >/dev/null
 run_monitor
 run_monitor
 run_monitor
 podman unpause samba-dc >/dev/null
 check "Probe failure alert is sent once at the threshold" \
-    bash -c "[[ $(ntfy_count) == 2 ]] && tail -n 1 '${out}/ntfy.jsonl' | jq -e '.title | startswith(\"AD replication check failed\")'"
+    bash -c "[[ $(ntfy_count) == $((before + 1)) ]] && tail -n 1 '${out}/ntfy.jsonl' | jq -e '.title | startswith(\"AD replication check failed\")'"
 
 start_dc1
 check "DC B recovers inbound replication after DC A returns" poll 420 replication_clean samba-dc
+before=$(ntfy_count)
 run_monitor
 check "Monitor clears the incident on recovery without a new alert" \
-    bash -c "[[ $(ntfy_count) == 2 ]] && jq -e '.active_replication == [] and .probe_failures == 0' '${work}/monitor-state/ad-replication-monitor-state.json'"
+    bash -c "[[ $(ntfy_count) == ${before} ]] && jq -e '.active_replication == [] and .probe_failures == 0' '${work}/monitor-state/ad-replication-monitor-state.json'"
 kill "${receiver_pid}" 2>/dev/null
 receiver_pid=
 
@@ -419,6 +431,18 @@ else
     info "DC A cannot pull from the rejoined DC: $(tail -n 1 "${out}/dc1-pull-from-dc2.txt")"
 fi
 info "DC A inbound view after rejoin: $(jq -c '[.repsFrom[]? | {DSA, guid: .["DSA objectGUID"], deleted: .["is deleted"], fails: .["consecutive failures"], msg: .["last attempt message"]}] | unique' "${out}/showrepl-dc1-after-rejoin.json" 2>/dev/null)"
+# Hypothesis: DC A's running Samba still holds a Kerberos service ticket for
+# dc2 encrypted with the replaced DC2$ account key. A restart drops it.
+if ! replication_clean dc1 >/dev/null 2>&1; then
+    podman restart -t 10 dc1 >/dev/null
+    for port in 53 88 389 3268; do poll 180 bash -c "exec 3<>/dev/tcp/${a_ip}/${port}"; done
+    if poll 300 user_exists dc1 itest-after-rejoin && poll 300 replication_clean dc1; then
+        info "Restarting DC A's Samba fixes replication from the rejoined DC"
+    else
+        info "Restarting DC A's Samba does not fix replication from the rejoined DC"
+        showrepl dc1 > "${out}/showrepl-dc1-after-restart.json" 2>&1
+    fi
+fi
 
 #######################################################################
 section "Test 5: restore DC B while DC A is down (forced)"
