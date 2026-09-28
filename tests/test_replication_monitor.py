@@ -120,6 +120,23 @@ class ReplicationMonitorTests(unittest.TestCase):
             self.assertEqual(self.monitor.main(), 0)
             send_ntfy.assert_called_once()
 
+    def test_bad_threshold_alerts_once_and_monitor_uses_safe_default(self):
+        failing = self.command_result(self.replication_payload(3))
+        with mock.patch.dict(os.environ, {"NTFY_REPLICATION_FAILURE_THRESHOLD": "broken"}), mock.patch.object(
+            self.monitor.subprocess, "run", return_value=failing
+        ), mock.patch.object(self.monitor, "send_ntfy") as send_ntfy:
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(send_ntfy.call_count, 2)
+            self.assertIn("configuration invalid", send_ntfy.call_args_list[0].args[0])
+            self.assertIn("replication failed", send_ntfy.call_args_list[1].args[0])
+
+            os.environ["NTFY_REPLICATION_FAILURE_THRESHOLD"] = "2"
+            self.assertEqual(self.monitor.main(), 0)
+            os.environ["NTFY_REPLICATION_FAILURE_THRESHOLD"] = "0"
+            self.assertEqual(self.monitor.main(), 0)
+            self.assertEqual(send_ntfy.call_count, 3)
+
     def test_probe_failure_does_not_reset_replication_alert(self):
         failing = self.command_result(self.replication_payload(2))
         failed_probe = self.command_result(returncode=1, stderr="container down")
