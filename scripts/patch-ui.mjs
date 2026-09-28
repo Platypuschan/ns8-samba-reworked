@@ -80,6 +80,8 @@ const translations = {
         "Select a directly reachable DC address outside the NS8 cluster VPN range.",
       invalid_environment_linebreak:
         "The ldapservice password cannot contain a line break.",
+      invalid_join_credentials_linebreak:
+        "Domain join credentials cannot contain a line break.",
       remote_dc_dns_check_failed:
         "The existing domain controller did not answer the required AD DNS lookup.",
       hostname_check_failed:
@@ -160,6 +162,8 @@ const translations = {
         "Wähle eine direkt erreichbare DC-Adresse außerhalb des NS8-Cluster-VPNs.",
       invalid_environment_linebreak:
         "Das ldapservice-Passwort darf keinen Zeilenumbruch enthalten.",
+      invalid_join_credentials_linebreak:
+        "Die Zugangsdaten für den Domänenbeitritt dürfen keinen Zeilenumbruch enthalten.",
       remote_dc_dns_check_failed:
         "Der vorhandene Domänencontroller hat die erforderliche AD-DNS-Abfrage nicht beantwortet.",
       hostname_check_failed:

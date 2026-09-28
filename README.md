@@ -51,14 +51,16 @@ dig @198.51.100.2 dc1.ad.example.com A +short
 
 ## Install the pinned module image
 
-Run this on the new standalone NS8 leader. Pin the custom version used in
-production; do not deploy `latest` to a domain controller.
+Run this on the new standalone NS8 leader. Select a tested version from the
+[releases page](https://github.com/Platypuschan/ns8-samba-reworked/releases)
+and enter it without the leading `v`. Pin that version in production; do not
+deploy `latest` to a domain controller.
 
 ```bash
-api-cli run add-internal-provider --data '{
-  "image": "ghcr.io/platypuschan/samba:1.1.0",
-  "node": 1
-}'
+read -rp 'Samba module version: ' SAMBA_VERSION
+jq -n --arg image "ghcr.io/platypuschan/samba:${SAMBA_VERSION}" \
+  '{image: $image, node: 1}' |
+  api-cli run add-internal-provider --data -
 ```
 
 Record the returned module ID. On a new cluster it will normally be `samba1`.
@@ -66,6 +68,21 @@ Record the returned module ID. On a new cluster it will normally be `samba1`.
 The package may initially be private after its first GHCR publication. If so,
 make the `samba` package public in the repository owner's GitHub package
 settings before installing it on NS8.
+
+To update an existing instance, run this on its NS8 cluster leader. Replace
+`samba1` with the installed instance ID and select the tested release version:
+
+```bash
+read -rp 'Samba module version: ' SAMBA_VERSION
+jq -n --arg module_url "ghcr.io/platypuschan/samba:${SAMBA_VERSION}" \
+  --arg instance 'samba1' \
+  '{module_url: $module_url, instances: [$instance]}' |
+  api-cli run update-module --data -
+```
+
+The update restarts the module. Verify the installed version and the DC's
+replication status afterwards; publishing a new image does not update running
+instances automatically.
 
 ## Reuse `ldapservice` safely
 
@@ -236,6 +253,12 @@ An existing version tag without a GitHub release needs manual reconciliation
 with its published image; the workflow refuses to rebuild and overwrite that
 tag. Queued runs check out the current `main` when they start and abandon a
 candidate if `main` changes during testing.
+
+If the tag was pushed but creating the GitHub release failed, check the
+existing tag, the published versioned image and its digest, then create the
+missing GitHub release for that tag. Do not rebuild the same version to repair
+the release metadata.
+
 The settings UI patch uses explicit source anchors. SHA-256 checks protect
 the replaced setup wizard and join script from silent upstream changes. Either
 change requires review and a deliberate hash update before a candidate builds.
