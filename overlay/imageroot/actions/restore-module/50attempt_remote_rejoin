@@ -6,15 +6,14 @@ exec 1>&2
 set -euo pipefail
 
 marker="${AGENT_STATE_DIR:?}/remote-restore-joined"
-rm -f -- "${marker}"
-rm -f -- "${AGENT_STATE_DIR}/remote-restore-mode"
-rm -f -- "${AGENT_STATE_DIR}/remote-restore-join-attempted"
 [[ ${PROVISION_MODE:-} == join-remote-domain ]] || exit 0
+# 45/46 already brought the DC back from its snapshot.
+[[ -f ${marker} ]] && exit 0
 
-# The backup includes the offline domain archive, not the local DC database.
-# A restore always needs a fresh join before it can use the surviving domain.
-# Normal cluster restores cannot forward one-time credentials; the saved
-# service account is tried in case it has been delegated join permissions.
+# Second choice: join the surviving domain as a new DC under the name that
+# upstream 06copyenv assigned (rN suffix). Normal cluster restores cannot
+# forward one-time credentials; the saved service account is tried in case
+# it has been delegated join permissions.
 readarray -t credentials < <(jq -r '.recovery_adminuser // "", .recovery_adminpass // ""')
 if [[ -n ${credentials[0]} && -n ${credentials[1]} ]]; then
     echo 'Attempting a fresh join of the surviving domain with one-time credentials.'
@@ -56,7 +55,7 @@ chmod 0600 "${tmpenv}"
     printf '%s' "${credentials[0]}" | base64 --wrap=0
     printf '\nADMINPASS_B64='
     printf '%s' "${credentials[1]}" | base64 --wrap=0
-    printf '\nREUSE_BACKUP_MACHINEPASS=1\n'
+    printf '\n'
 ) > "${tmpenv}"
 unset credentials
 

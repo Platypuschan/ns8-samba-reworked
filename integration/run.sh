@@ -28,7 +28,6 @@ unreachable_ip=10.89.0.99
 realm=AD.EXAMPLE.TEST
 domain=ad.example.test
 nbdomain=AD
-basedn=DC=ad,DC=example,DC=test
 # Test-only credentials for a throwaway domain.
 admin_pass='Integration-Admin-2026!'
 service_pass='Integration-Service-2026!'
@@ -74,7 +73,8 @@ run_step() {
         # shellcheck disable=SC1091
         source ./environment
         set +a
-        export AGENT_STATE_DIR=${state} AGENT_INSTALL_DIR=${overlay} MODULE_ID=samba1 \
+        export AGENT_STATE_DIR=${state} AGENT_INSTALL_DIR=${overlay} MODULE_ID=samba1 NODE_ID=1 \
+            IT_UPSTREAM_ROOT=${upstream_root} \
             SAMBA_DC_IMAGE=${image} PODMAN_BIN=${repo_root}/integration/bin/podman \
             PYTHONPATH=${repo_root}/integration/lib \
             PATH=${repo_root}/integration/bin:${PATH}
@@ -118,6 +118,14 @@ replication_clean() {
 }
 
 user_exists() { podman exec "$1" samba-tool user show "$2"; }
+sam_value() {
+    podman exec "$1" ldbsearch -H /var/lib/samba/private/sam.ldb "(sAMAccountName=$2)" "$3" |
+        sed -n "s/^$3: //p"
+}
+sam_all_sids() {
+    podman exec "$1" ldbsearch -H /var/lib/samba/private/sam.ldb '(objectSid=*)' objectSid |
+        sed -n 's/^objectSid: \(S-1-5-21-.*\)$/\1/p'
+}
 
 kinit_at() {
     local kdc=$1 principal=$2 password=$3
@@ -187,6 +195,18 @@ summary() {
 #######################################################################
 section "Setup"
 podman --version
+# Upstream restore steps and helpers that run in the NS8 restore before and
+# between this module's steps. Pinned by the same hashes as the image build.
+upstream_root=${work}/ns8-samba-${upstream_version}
+rm -rf "${upstream_root}"
+curl --fail --silent --show-error --location --retry 3 \
+    "https://github.com/NethServer/ns8-samba/archive/refs/tags/${upstream_version}.tar.gz" |
+    tar -xz -C "${work}"
+(cd "${upstream_root}" && sha256sum --check "${repo_root}/scripts/upstream-restore-state.sha256") || {
+    fail "Upstream ${upstream_version} restore steps match the pinned hashes"
+    summary
+    exit 1
+}
 podman pull -q "${image}"
 podman network rm --force "${IT_NETWORK}" >/dev/null 2>&1
 podman network create --disable-dns --subnet="${subnet}" "${IT_NETWORK}"
@@ -212,7 +232,6 @@ start_dc1() {
     podman run --detach --name=dc1 --replace --network="${IT_NETWORK}" --ip="${a_ip}" \
         --hostname="dc1.${domain}" --dns=none --no-hosts \
         --env=REALM="${realm}" --env=IPADDRESS="${a_ip}" --env=NBDOMAIN="${nbdomain}" \
-        ${a_loglevel:+"--env=SAMBA_LOGLEVEL=${a_loglevel}"} \
         --volume=a-data:/var/lib/samba:z --volume=a-config:/etc/samba:z \
         --volume=a-shares:/srv/shares --volume=a-homes:/srv/homes \
         "${image}" </dev/null >/dev/null 2>&1
@@ -383,8 +402,16 @@ podman run --rm --volume=config:/src/config:z --volume=data:/src/data:z \
     --volume="${work}/backup:/dst:z" --entrypoint=tar "${image}" \
     -C /src -cf /dst/volumes.tar config data/backup
 cp "${state}/environment" "${work}/backup/environment"
-on_a samba-tool user create itest-after-backup "${user_pass}" >/dev/null
 
+# Changes after the backup on both sides. DC B's own changes must come back
+# to its snapshot from DC A.
+on_a samba-tool user create itest-after-backup "${user_pass}" >/dev/null
+on_b samba-tool user create itest-b-after-backup "${user_pass}" >/dev/null
+check "DC A has DC B's user created after the backup" poll 300 user_exists dc1 itest-b-after-backup
+b_after_backup_sid=$(sam_value samba-dc itest-b-after-backup objectSid)
+
+# restore_b [ADMIN_PASSWORD [RECOVERY_IPADDRESS]]: the restore-module steps
+# of upstream and this overlay, in NS8 order, on the backed-up volumes.
 restore_b() {
     "${repo_root}/integration/bin/systemctl" --user stop samba-dc.service
     remove_b
@@ -395,76 +422,99 @@ restore_b() {
     podman volume create config >/dev/null
     podman run --rm --volume=config:/dst/config:z --volume=data:/dst/data:z \
         --volume="${work}/backup:/src:z" --entrypoint=tar "${image}" -C /dst -xf /src/volumes.tar
-    local input step
+    local input step path
     input=$(jq -n --argjson env "$(environment_json "${state}/environment")" '{environment: $env}')
     if [[ -n ${1:-} ]]; then
         input=$(jq --arg u administrator --arg p "$1" '. + {recovery_adminuser: $u, recovery_adminpass: $p}' <<< "${input}")
     fi
-    for step in 04validate_environment 07copy_custom_env 08validate_remote_ip \
+    if [[ -n ${2:-} ]]; then
+        input=$(jq --arg ip "$2" '. + {recovery_ipaddress: $ip}' <<< "${input}")
+    fi
+    for step in 04validate_environment 06copyenv 07copy_custom_env 08validate_remote_ip \
+        45prepare_snapshot_restore 46start_snapshot_restore \
         50attempt_remote_rejoin 55rename_forced_dc 60resume_state; do
+        path=${actions}/restore-module/${step}
+        [[ ${step} == 06copyenv ]] && path=${upstream_root}/imageroot/actions/restore-module/${step}
         printf -- '--- restore-module/%s\n' "${step}" >> "${out}/steps.log"
-        run_step "${actions}/restore-module/${step}" /dev/null "${input}" || {
+        run_step "${path}" /dev/null "${input}" || {
             printf 'restore-module/%s failed\n' "${step}" >&2
             return 1
         }
     done
 }
 
+create_user_on_b() { on_b samba-tool user create "$1" "${user_pass}" || user_exists samba-dc "$1"; }
+no_duplicate_sids() {
+    [[ -z $({ sam_all_sids dc1; sam_all_sids samba-dc; } | sort | uniq -c | awk '$1 > 2') ]]
+}
+
 #######################################################################
-section "Test 4: restore DC B while DC A is alive (rejoin)"
-# Verbose authentication and DRS logging for diagnosing the rejoined DC.
-debug_loglevel='2 auth:5 auth_audit:3 drs_repl:4 rpc_srv:4 kerberos:5 dsdb:3'
-export SAMBA_LOGLEVEL=${debug_loglevel}
-restore_b "${admin_pass}" > "${out}/restore-rejoin.log" 2>&1
+section "Test 4: snapshot restore of DC B while DC A is alive"
+export IT_HOST_IPS=${IT_B_IP}
+restore_b > "${out}/restore-snapshot.log" 2>&1
+code=$?
+cat "${out}/restore-snapshot.log"
+check "Snapshot restore steps complete (exit ${code})" test "${code}" -eq 0
+check "Restore mode is 'snapshot'" grep -qx snapshot "${state}/remote-restore-mode"
+check "Snapshot DC keeps its name" bash -c "[[ $(env_value HOSTNAME) == dc2.${domain} ]]"
+check "Snapshot DC keeps its address" bash -c "[[ $(env_value IPADDRESS) == ${IT_B_IP} ]]"
+check "Snapshot DC receives a user DC A created after the backup" poll 300 user_exists samba-dc itest-after-backup
+check "Snapshot DC gets back its own user created after the backup" poll 300 user_exists samba-dc itest-b-after-backup
+check "Snapshot DC can create a user" poll 180 create_user_on_b itest-after-snapshot
+check "The new user does not reuse a SID from after the backup" \
+    bash -c "[[ -n '$(sam_value samba-dc itest-after-snapshot objectSid)' && '$(sam_value samba-dc itest-after-snapshot objectSid)' != '${b_after_backup_sid}' ]]"
+check "User created on the snapshot DC replicates to DC A" poll 300 user_exists dc1 itest-after-snapshot
+check "DC A replicates with the snapshot DC without failures" poll 420 replication_clean dc1
+check "Snapshot DC replicates without failures" poll 420 replication_clean samba-dc
+check "No SID is used by two objects" poll 60 no_duplicate_sids
+check "Snapshot DC issues a Kerberos ticket for a user created on DC A" \
+    kinit_at "${IT_B_IP}" itest-after-backup "${user_pass}"
+for c in dc1 samba-dc; do
+    podman exec "${c}" samba-tool dbcheck --cross-ncs > "${out}/dbcheck-${c}-snapshot.txt" 2>&1
+    check "dbcheck --cross-ncs on ${c} after the snapshot restore" test $? -eq 0
+done
+showrepl samba-dc > "${out}/showrepl-dc2-snapshot.json" 2>&1
+showrepl dc1 > "${out}/showrepl-dc1-after-snapshot.json" 2>&1
+
+#######################################################################
+section "Test 5: rejoin as dc2r1 on another address"
+# The backed-up address is missing on this node: upstream falls back to the
+# VPN address, the overlay takes recovery_ipaddress instead, the snapshot is
+# skipped and DC B joins under upstream's new name.
+alt_ip=10.89.0.13
+export IT_HOST_IPS=${alt_ip}
+restore_b "${admin_pass}" "${alt_ip}" > "${out}/restore-rejoin.log" 2>&1
 code=$?
 cat "${out}/restore-rejoin.log"
 check "Rejoin restore steps complete (exit ${code})" test "${code}" -eq 0
 check "Restore mode is 'joined'" grep -qx joined "${state}/remote-restore-mode"
-check "Rejoin reuses the machine password from the backup" \
-    grep -q 'Reusing the machine account password from the backup' "${out}/restore-rejoin.log"
-check "Rejoined DC keeps its hostname" bash -c "[[ $(env_value HOSTNAME) == dc2.${domain} ]]"
+check "Snapshot restore was skipped for the changed address" \
+    grep -q 'Snapshot restore skipped: the backed-up address' "${out}/restore-rejoin.log"
+check "Rejoined DC is named dc2r1" bash -c "[[ $(env_value HOSTNAME) == dc2r1.${domain} ]]"
+check "Rejoined DC uses recovery_ipaddress" bash -c "[[ $(env_value IPADDRESS) == ${alt_ip} ]]"
 check "Rejoined DC received a user created after the backup" poll 300 user_exists samba-dc itest-after-backup
-on_b samba-tool user create itest-after-rejoin "${user_pass}" >/dev/null
-check "User created on the rejoined DC replicates to DC A" poll 300 user_exists dc1 itest-after-rejoin
+check "Rejoined DC can create a user" poll 180 create_user_on_b itest-after-rejoin
+check "DC A has the user created on the rejoined DC" poll 300 user_exists dc1 itest-after-rejoin
+# The lost dc2 stays registered on DC A, as documented; remove it as an
+# administrator would before checking DC A's replication.
+on_a samba-tool domain demote --remove-other-dead-server=dc2 > "${out}/demote-dc2.log" 2>&1
+check "Removing the lost dc2 from DC A" test $? -eq 0
 check "DC A replicates with the rejoined DC without failures" poll 420 replication_clean dc1
-showrepl samba-dc > "${out}/showrepl-dc2-rejoined.json"
-showrepl dc1 > "${out}/showrepl-dc1-after-rejoin.json" 2>&1
-podman logs --tail 300 dc1 > "${out}/dc1-after-rejoin.log" 2>&1
-# Ask DC A to pull from the rejoined DC now and record Samba's answer.
-if on_a samba-tool drs replicate dc1 dc2 "${basedn}" > "${out}/dc1-pull-from-dc2.txt" 2>&1; then
-    info "DC A can pull from the rejoined DC on request"
-else
-    info "DC A cannot pull from the rejoined DC: $(tail -n 1 "${out}/dc1-pull-from-dc2.txt")"
-fi
-podman logs --tail 1500 samba-dc > "${out}/dc2-after-rejoin.log" 2>&1
-info "DC A inbound view after rejoin: $(jq -c '[.repsFrom[]? | {DSA, guid: .["DSA objectGUID"], deleted: .["is deleted"], fails: .["consecutive failures"], msg: .["last attempt message"]}] | unique' "${out}/showrepl-dc1-after-rejoin.json" 2>/dev/null)"
-# Hypothesis: DC A's running Samba still holds a Kerberos service ticket for
-# dc2 encrypted with the replaced DC2$ account key. Recreating the container,
-# as the NS8 unit does, drops it.
-if ! replication_clean dc1 >/dev/null 2>&1; then
-    podman stop -t 10 dc1 >/dev/null
-    a_loglevel=${debug_loglevel}
-    start_dc1 || info "DC A did not come back after recreation"
-    if poll 300 user_exists dc1 itest-after-rejoin && poll 300 replication_clean dc1; then
-        info "Restarting DC A's Samba fixes replication from the rejoined DC"
-    else
-        info "Restarting DC A's Samba does not fix replication from the rejoined DC"
-        showrepl dc1 > "${out}/showrepl-dc1-after-restart.json" 2>&1
-        podman logs --tail 1500 dc1 > "${out}/dc1-after-restart.log" 2>&1
-        podman logs --tail 1500 samba-dc > "${out}/dc2-after-dc1-restart.log" 2>&1
-    fi
-fi
+showrepl samba-dc > "${out}/showrepl-dc2r1-rejoined.json" 2>&1
 
 #######################################################################
-section "Test 5: restore DC B while DC A is down (forced)"
-unset SAMBA_LOGLEVEL a_loglevel
+section "Test 6: restore DC B while DC A is down (forced)"
+export IT_HOST_IPS=${IT_B_IP}
 podman stop -t 10 dc1 >/dev/null
 restore_b > "${out}/restore-forced.log" 2>&1
 code=$?
 cat "${out}/restore-forced.log"
 check "Forced restore steps complete (exit ${code})" test "${code}" -eq 0
 check "Restore mode is 'forced'" grep -qx forced "${state}/remote-restore-mode"
-check "Forced restore renames the DC to dc2r1" bash -c "[[ $(env_value HOSTNAME) == dc2r1.${domain} ]]"
+check "Snapshot restore was skipped for the unreachable DC" \
+    grep -q 'Snapshot restore skipped: the surviving DC' "${out}/restore-forced.log"
+check "Forced restore after an attempted join renames the DC to dc2r2" \
+    bash -c "[[ $(env_value HOSTNAME) == dc2r2.${domain} ]]"
 check "Forced DC is running" "${repo_root}/integration/bin/systemctl" --user is-active --quiet samba-dc.service
 check "Forced DC contains a user from the backup" user_exists samba-dc itest-a
 if user_exists samba-dc itest-after-backup >/dev/null 2>&1; then
@@ -473,13 +523,6 @@ else
     pass "Forced DC is an independent copy (no user created after the backup)"
 fi
 check "Forced DC issues Kerberos tickets" kinit_at "${IT_B_IP}" itest-a "${user_pass}"
-showrepl samba-dc > "${out}/showrepl-dc2r1-forced.json" 2>&1
-info "Forced DC replication partners: $(jq -c '[.repsFrom[]? | .["DSA"] // .["NTDS DN"]]' "${out}/showrepl-dc2r1-forced.json" 2>/dev/null)"
-
-start_dc1
-on_a ldbsearch -H /var/lib/samba/private/sam.ldb -b "CN=Sites,CN=Configuration,${basedn}" \
-    objectClass=server dn > "${out}/dc1-servers-after-forced.txt" 2>&1
-info "Server objects on DC A after the forced restore: $(grep -o '^dn: CN=[^,]*' "${out}/dc1-servers-after-forced.txt" | cut -d= -f2 | paste -sd ' ')"
 
 summary
 exit $((failures > 0))

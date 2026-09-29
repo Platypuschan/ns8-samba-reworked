@@ -24,7 +24,7 @@ jobs:
   integration:
     # Two real Samba DCs from the upstream samba-dc image; see integration/run.sh.
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -49,35 +49,4 @@ jobs:
         with:
           name: samba-integration-logs
           path: ${{ runner.temp }}/samba-it
-          if-no-files-found: ignore
-
-  snapshot-restore:
-    # Experiment: restore a DC from its offline backup under its old identity.
-    # "naive" shows the baseline and may fail; see integration/snapshot-restore.sh.
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    continue-on-error: ${{ matrix.mode == 'naive' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [nonauth, naive]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Run snapshot restore experiment
-        run: sudo --preserve-env=GITHUB_STEP_SUMMARY ./integration/snapshot-restore.sh "${RUNNER_TEMP}/samba-snap" ${{ matrix.mode }}
-
-      - name: Prepare logs
-        if: always()
-        run: |
-          sudo rm -rf "${RUNNER_TEMP}/samba-snap/work/backup"
-          sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/samba-snap"
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: samba-snapshot-${{ matrix.mode }}
-          path: ${{ runner.temp }}/samba-snap
           if-no-files-found: ignore

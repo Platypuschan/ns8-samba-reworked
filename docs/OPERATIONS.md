@@ -67,42 +67,60 @@ The ntfy token is stored in the module environment and is never emitted by the
 
 ## Restoring a remote-joined DC
 
-For `PROVISION_MODE=join-remote-domain`, the module attempts a fresh join using
-the saved peer address, realm, service account, and password. A module-level
-restore request may supply one-time `recovery_adminuser` and
-`recovery_adminpass` for the join. The cluster restore action does not forward
-those fields. A direct restore must supply both nonempty values or omit both;
-malformed credentials fail validation before the restore copies backup data.
-Passwords with tabs are supported, while user names with tabs are rejected.
-With the usual non-admin `ldapservice` account its join will
-normally fail. After join, the DC must start and report successful inbound
-replication. The action reports the outbound DRS notification separately,
-without treating a pending notification as a failed join. On failure it stops
-a partially started DC, restores the offline
-domain archive, and starts the independent DC. Inspect
-`state/remote-restore-mode` and the restore log to see `joined` or `forced`.
-The outbound notification does not prove that the surviving DC pulled changes;
-check `samba-tool drs showrepl` on the surviving DC after a successful join.
+For `PROVISION_MODE=join-remote-domain` the restore tries three steps, in
+this order, and records the result in `state/remote-restore-mode`
+(`snapshot`, `joined` or `forced`) and in the restore log.
 
-The restored DC rejoins under its previous name and reuses the machine account
-password from the offline backup. The surviving DC may still hold Kerberos
-service tickets for that name. With a new password the restored DC rejects
-them, and the surviving DC cannot replicate from it until its Samba restarts.
-If the backup holds no usable password, the join uses a new one and the
-restore log says so; then restart `samba-dc` on the surviving DC after the
-restore.
+1. **Snapshot restore.** The DC comes back from its offline backup under its
+   original name, address and computer account, like a Windows
+   non-authoritative restore. Before it starts, it gets a new invocationId, an
+   up-to-dateness vector that covers the backup and a used-up RID pool. It then
+   pulls everything it missed, including its own changes made after the
+   backup, and hands out RIDs only from a new pool. No credentials are needed.
+   The step runs only if the backed-up address is available on the node, the
+   surviving DC answers on ports 88 and 389, the DC held no FSMO role at
+   backup time, and the backup is younger than the tombstone lifetime minus
+   one day. It succeeds only when this DC reports successful inbound
+   replication and the surviving DC, read with this DC's computer account,
+   shows the new invocationId, which proves that it replicated from this DC.
+   Otherwise the DC is stopped, its database removed, and the restore
+   continues. Samba has no command for this procedure; the module applies the
+   same database changes that `samba-tool domain backup restore` uses, but
+   keeps the DC's identity.
+2. **Rejoin under a new name.** The DC joins the surviving domain as a new DC
+   under the `rN` name that upstream assigns during restore (for example
+   `dc2r1`). A module-level restore request may supply one-time
+   `recovery_adminuser` and `recovery_adminpass`, usually a domain
+   administrator. Without them the saved `ldapservice` account is tried,
+   which normally lacks join permission. A direct restore must supply both
+   nonempty values or omit both; malformed credentials fail validation before
+   the restore copies backup data. Passwords with tabs are supported, while
+   user names with tabs are rejected. After the join the DC must start and
+   report successful inbound replication.
+3. **Forced restore.** The offline domain archive becomes an independent copy
+   of the domain, started under another new name after an attempted join (for
+   example `dc2r2`). No credentials are needed.
+
+The cluster restore action does not forward the `recovery_*` fields; use a
+module-level `restore-module` request to pass them.
 
 **A forced restore can split a live domain.** Keep the two copies isolated
 until you choose which one will be authoritative. Verify authentication against
 the restored DC, then reconcile client DNS settings and any directory changes.
-A failed or partially successful join can leave a stale DC computer account
-and server/NTDS Settings objects and DNS A/SRV records on the surviving
-domain. The forced copy uses another new DC name after an attempted join; it
-does not remove those objects. Check the surviving domain before another join.
-If the restored address would be empty or inside the target node's cluster
-VPN, restore fails before joining or rebuilding. Move the original address to
-the target node or use a node with a reachable non-VPN address, then retry.
-Monitoring settings from the backup are retained.
+After a rejoin or forced restore the previous DC name stays registered in the
+surviving domain, together with its DNS A/SRV records, and so do objects of a
+failed join. Remove them there, for example with `samba-tool domain demote
+--remove-other-dead-server=<old name>` on the surviving DC, and check
+`dbcheck --cross-ncs`.
+
+If the backed-up address is not available on the target node, upstream
+substitutes the node's cluster VPN address, which a remote DC cannot use. Pass
+`recovery_ipaddress` with one of the node's non-VPN addresses in the
+module-level request; the error message lists the candidates. The snapshot
+step is skipped then, because it keeps the original address. Without
+`recovery_ipaddress`, or if the result would be empty or inside the cluster
+VPN, the restore fails before any branch starts. Monitoring settings from the
+backup are retained.
 
 During provisioning the module bind-mounts a corrected copy of the upstream
 `join-domain` script into the official Samba runtime image. This preserves

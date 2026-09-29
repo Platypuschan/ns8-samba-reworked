@@ -13,30 +13,6 @@ search ${REALM,,}
 nameserver ${JOINADDRESS:?}
 EOF
 
-# Print the machine password stored in the offline domain backup of this DC.
-read_backup_machine_password() {
-    local archive=/var/lib/samba/backup/samba-backup.tar.bz2 member tmpdir status=0
-    [[ -s ${archive} ]] || return 1
-    member=$(tar -tjf "${archive}" | grep -E '(^|/)private/secrets\.ldb$' | head -n 1)
-    [[ -n ${member} ]] || return 1
-    tmpdir=$(mktemp -d)
-    tar -xjf "${archive}" -C "${tmpdir}" "${member}" &&
-        python3 - "${tmpdir}/${member}" <<'EOF' || status=1
-import sys
-
-import ldb
-
-result = ldb.Ldb(sys.argv[1]).search(expression="(objectClass=primaryDomain)",
-                                     attrs=["secret"])
-secret = bytes(result[0]["secret"][0]) if len(result) == 1 and "secret" in result[0] else b""
-if not secret or any(char in secret for char in b"\0\r\n"):
-    sys.exit(1)
-sys.stdout.buffer.write(secret)
-EOF
-    rm -rf "${tmpdir}"
-    return "${status}"
-}
-
 rm -f /etc/samba/smb.conf
 adminuser=$(printf '%s' "${ADMINUSER_B64:?}" | base64 -d)
 adminpass=$(printf '%s' "${ADMINPASS_B64:?}" | base64 -d)
@@ -44,22 +20,7 @@ kinit "${adminuser}" <<<"${adminpass}" || exit 33
 tmpout=$(mktemp)
 trap 'kdestroy ; rm -f "${tmpout}"' EXIT
 
-# A restored DC rejoins under its previous name. The surviving DCs may hold
-# cached service tickets encrypted with that account's key; keeping the
-# password keeps those tickets valid and inbound replication working.
-machinepass=()
-if [[ ${REUSE_BACKUP_MACHINEPASS:-} == 1 ]]; then
-    if backup_machinepass=$(read_backup_machine_password); then
-        machinepass=("--machinepass=${backup_machinepass}")
-        echo 'Reusing the machine account password from the backup.'
-    else
-        echo 'No usable machine account password in the backup; joining with a new one.'
-    fi
-    unset backup_machinepass
-fi
-
 samba-tool domain join "${REALM,,}" DC \
-    "${machinepass[@]}" \
     --use-kerberos=required \
     "--option=bind interfaces only = yes" \
     ${PREFIXLEN:+"--option=disable netbios = yes"} \

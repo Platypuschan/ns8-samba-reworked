@@ -18,7 +18,7 @@ for argument; do
     if [[ ${argument} == --network=host ]]; then
         arguments+=("--network=${IT_NETWORK:?}")
         if [[ -n ${dc_container} ]]; then
-            arguments+=("--ip=${IT_B_IP:?}")
+            arguments+=("--ip=${IPADDRESS:-${IT_B_IP:?}}")
         fi
     else
         arguments+=("${argument}")

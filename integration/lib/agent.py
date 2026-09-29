@@ -2,7 +2,6 @@
 
 """File-backed stand-in for the NS8 agent library used by the actions."""
 
-import contextlib
 import os
 import sys
 
@@ -42,16 +41,39 @@ def set_status(status):
     print(f"agent status: {status}", file=sys.stderr)
 
 
+SD_ERR = "<3>"
+SD_WARNING = "<4>"
+SD_NOTICE = "<5>"
+
+
 class _Redis:
+    """Answers the reads of the restore steps; writes are accepted."""
+
     def get(self, key):
         if key == "cluster/network":
             return os.environ.get("IT_CLUSTER_NETWORK", "10.5.4.0/24")
         return None
 
+    def hget(self, key, field):
+        if key.endswith("/vpn") and field == "ip_address":
+            return os.environ.get("IT_VPN_IP", "10.5.4.2")
+        return None
+
     def sadd(self, *_args):
         return 1
 
+    def srem(self, *_args):
+        return 1
 
-@contextlib.contextmanager
+    def set(self, *_args):
+        return True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
 def redis_connect(**_kwargs):
-    yield _Redis()
+    return _Redis()
