@@ -420,6 +420,8 @@ code=$?
 cat "${out}/restore-rejoin.log"
 check "Rejoin restore steps complete (exit ${code})" test "${code}" -eq 0
 check "Restore mode is 'joined'" grep -qx joined "${state}/remote-restore-mode"
+check "Rejoin reuses the machine password from the backup" \
+    grep -q 'Reusing the machine account password from the backup' "${out}/restore-rejoin.log"
 check "Rejoined DC keeps its hostname" bash -c "[[ $(env_value HOSTNAME) == dc2.${domain} ]]"
 check "Rejoined DC received a user created after the backup" poll 300 user_exists samba-dc itest-after-backup
 on_b samba-tool user create itest-after-rejoin "${user_pass}" >/dev/null

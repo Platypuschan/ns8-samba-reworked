@@ -259,6 +259,7 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "    if [[ $argument == --env-file=* ]]; then\n"
                 "      sed -n 's/^ADMINUSER_B64=//p' \"${argument#*=}\" | base64 -d > \"$FAKE_CREDS.user\"\n"
                 "      sed -n 's/^ADMINPASS_B64=//p' \"${argument#*=}\" | base64 -d > \"$FAKE_CREDS.pass\"\n"
+                "      grep -c '^REUSE_BACKUP_MACHINEPASS=1$' \"${argument#*=}\" > \"$FAKE_CREDS.reuse\" || true\n"
                 "    fi\n"
                 "  done\n"
                 "  exit \"$FAKE_JOIN_EXIT\"\n"
@@ -342,6 +343,7 @@ class RemoteLifecycleTests(unittest.TestCase):
                 text=True, capture_output=True, cwd=work, env=environment, check=False,
             )
             self.assertEqual(restore.returncode, 0, restore.stderr)
+            self.reused_machine_password = (work / "creds.reuse").read_text().strip() == "1"
             return (calls.read_text(), (work / "remote-restore-mode").read_text(),
                     ((work / "creds.user").read_text(), (work / "creds.pass").read_text()),
                     join.stderr + rename_log + restore.stderr,
@@ -353,6 +355,7 @@ class RemoteLifecycleTests(unittest.TestCase):
         })
         self.assertEqual(mode, "joined\n")
         self.assertEqual(credentials, ("Administrator", "once-only"))
+        self.assertTrue(self.reused_machine_password)
         self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertIn("drs showrepl --json", calls)
         self.assertNotIn("samba-tool domain backup restore", calls)
@@ -504,6 +507,7 @@ class RemoteLifecycleTests(unittest.TestCase):
             self.assertEqual(base64.b64decode(values["ADMINUSER_B64"]).decode(), "Administrator")
             self.assertEqual(base64.b64decode(values["ADMINPASS_B64"]).decode(), "\tsecret\t")
             self.assertNotIn("secret", stored.read_text())
+            self.assertNotIn("REUSE_BACKUP_MACHINEPASS", stored.read_text())
 
 
 if __name__ == "__main__":
