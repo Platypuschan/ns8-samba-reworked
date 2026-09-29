@@ -84,6 +84,14 @@ domain archive, and starts the independent DC. Inspect
 The outbound notification does not prove that the surviving DC pulled changes;
 check `samba-tool drs showrepl` on the surviving DC after a successful join.
 
+The restored DC rejoins under its previous name and reuses the machine account
+password from the offline backup. The surviving DC may still hold Kerberos
+service tickets for that name. With a new password the restored DC rejects
+them, and the surviving DC cannot replicate from it until its Samba restarts.
+If the backup holds no usable password, the join uses a new one and the
+restore log says so; then restart `samba-dc` on the surviving DC after the
+restore.
+
 **A forced restore can split a live domain.** Keep the two copies isolated
 until you choose which one will be authoritative. Verify authentication against
 the restored DC, then reconcile client DNS settings and any directory changes.
