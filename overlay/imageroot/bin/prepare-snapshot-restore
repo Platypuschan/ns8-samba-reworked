@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Put this DC's offline backup back in place for a snapshot restore.
+
+Runs inside the samba-dc image with the data and config volumes mounted and
+no network. Like a non-authoritative restore, the DC keeps its name, NTDS
+object and computer account, but gets a new invocationId, an up-to-dateness
+vector that covers the backup, and a used-up RID pool. Partners then send it
+everything it missed, accept its new changes, and it never hands out a RID
+it may have used after the backup.
+
+Exit status 3 means that a precondition failed; nothing was changed in the
+surviving domain. The caller removes the partial database in either case.
+Prints a JSON report on success.
+"""
+
+import datetime
+import json
+import os
+import shutil
+import socket
+import sys
+import tarfile
+import uuid
+
+import ldb
+from samba.auth import system_session
+from samba.dcerpc import drsblobs, misc
+from samba.dsdb import _dsdb_load_udv_v2
+from samba.ndr import ndr_pack, ndr_unpack
+from samba.ntacls import backup_restore
+from samba.param import LoadParm
+from samba.samdb import SamDB
+
+
+DATA = "/var/lib/samba"
+ARCHIVE = os.path.join(DATA, "backup/samba-backup.tar.bz2")
+UNPACK = os.path.join(DATA, "snapshot-restore.tmp")
+BACKUP_MARKERS = ["sidForRestore", "backupRename", "backupDate", "backupType"]
+DEFAULT_TOMBSTONE_LIFETIME = 180
+
+
+def refuse(reason):
+    print(f"Snapshot restore not possible: {reason}", file=sys.stderr)
+    sys.exit(3)
+
+
+def single(samdb, base, attribute, scope=ldb.SCOPE_BASE, expression=None):
+    try:
+        result = samdb.search(base=base, scope=scope, expression=expression,
+                              attrs=[attribute])
+    except ldb.LdbError:
+        return None
+    if len(result) != 1 or attribute not in result[0]:
+        return None
+    return result[0][attribute][0]
+
+
+def unpack_backup():
+    if not os.path.isfile(ARCHIVE):
+        refuse("the backup contains no offline domain archive")
+    shutil.rmtree(UNPACK, ignore_errors=True)
+    os.makedirs(UNPACK)
+    with tarfile.open(ARCHIVE) as archive:
+        archive.extractall(UNPACK)
+    for name in ("private", "sysvol"):
+        shutil.rmtree(os.path.join(DATA, name), ignore_errors=True)
+    shutil.move(os.path.join(UNPACK, "private"), os.path.join(DATA, "private"))
+    state = os.path.join(UNPACK, "state")
+    if os.path.isdir(state):
+        for name in os.listdir(state):
+            if name.endswith(".tdb"):
+                shutil.move(os.path.join(state, name), os.path.join(DATA, name))
+
+
+def backup_age(samdb):
+    value = single(samdb, "@SAMBA_DSDB", "backupDate")
+    if value is None:
+        refuse("the database carries no backup date")
+    # samba-tool writes datetime.isoformat() with ':' replaced by '-'.
+    text = str(value)
+    for pattern in ("%Y-%m-%dT%H-%M-%S.%f", "%Y-%m-%dT%H-%M-%S"):
+        try:
+            taken = datetime.datetime.strptime(text, pattern)
+            break
+        except ValueError:
+            continue
+    else:
+        refuse(f"unreadable backup date {text}")
+    return datetime.datetime.now() - taken
+
+
+def check_preconditions(samdb, hostname):
+    ntds_dn = samdb.get_dsServiceName()
+    server_name = str(ldb.Dn(samdb, str(samdb.get_serverName())).get_rdn_value())
+    expected = hostname.split(".", 1)[0]
+    if server_name.lower() != expected.lower():
+        refuse(f"the backup belongs to DC {server_name}, not {expected}")
+
+    # A snapshot of a role owner would roll back that role's state, for
+    # example hand out RID pools a second time.
+    domain_dn = samdb.domain_dn()
+    config_dn = samdb.get_config_basedn()
+    role_objects = [
+        domain_dn,
+        f"CN=RID Manager$,CN=System,{domain_dn}",
+        f"CN=Infrastructure,{domain_dn}",
+        str(samdb.get_schema_basedn()),
+        f"CN=Partitions,{config_dn}",
+        f"CN=Infrastructure,DC=DomainDnsZones,{domain_dn}",
+        f"CN=Infrastructure,DC=ForestDnsZones,{samdb.get_root_basedn()}",
+    ]
+    for dn in role_objects:
+        owner = single(samdb, dn, "fSMORoleOwner")
+        if owner is not None and ldb.Dn(samdb, str(owner)) == ldb.Dn(samdb, str(ntds_dn)):
+            refuse(f"this DC holds the FSMO role of {dn}; transfer it before relying on a snapshot")
+
+    lifetime = single(samdb, f"CN=Directory Service,CN=Windows NT,CN=Services,{config_dn}",
+                      "tombstoneLifetime")
+    lifetime = int(lifetime) if lifetime is not None else DEFAULT_TOMBSTONE_LIFETIME
+    age = backup_age(samdb)
+    if age < datetime.timedelta(days=-1):
+        refuse("the backup date lies in the future")
+    # Keep a day of margin: deletions older than the tombstone lifetime are
+    # gone from the partners and could never reach this copy.
+    if age >= datetime.timedelta(days=lifetime - 1):
+        refuse(f"the backup is {age.days} days old; the tombstone lifetime is {lifetime} days")
+    return ntds_dn, age
+
+
+def remove_backup_markers(samdb):
+    result = samdb.search(base="@SAMBA_DSDB", scope=ldb.SCOPE_BASE, attrs=BACKUP_MARKERS)
+    message = ldb.Message(ldb.Dn(samdb, "@SAMBA_DSDB"))
+    for marker in BACKUP_MARKERS:
+        if marker in result[0]:
+            message[marker] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, marker)
+    if len(message) > 0:
+        samdb.modify(message)
+
+
+def save_uptodate_vectors(samdb):
+    # Record the backup's own cursor under the old invocationId. Partners
+    # filter what they send with it, so the changes this DC made after the
+    # backup (with higher USNs) still come back from them.
+    for nc in samdb.search(base="", scope=ldb.SCOPE_BASE,
+                           attrs=["namingContexts"])[0]["namingContexts"]:
+        cursors = _dsdb_load_udv_v2(samdb, str(nc))
+        blob = drsblobs.replUpToDateVectorBlob()
+        blob.version = 2
+        blob.ctr.cursors = cursors
+        blob.ctr.count = len(cursors)
+        message = ldb.Message(ldb.Dn(samdb, str(nc)))
+        message["replUpToDateVector"] = ldb.MessageElement(
+            ndr_pack(blob), ldb.FLAG_MOD_REPLACE, "replUpToDateVector")
+        samdb.modify(message)
+
+
+def discard_rid_pool(samdb):
+    computer_dn = single(samdb, samdb.get_serverName(), "serverReference")
+    rid_set_dn = single(samdb, str(computer_dn), "rIDSetReferences") if computer_dn else None
+    if rid_set_dn is None:
+        refuse("this DC has no RID Set")
+    result = samdb.search(base=str(rid_set_dn), scope=ldb.SCOPE_BASE,
+                          attrs=["rIDAllocationPool", "rIDPreviousAllocationPool"])[0]
+    pool = int(result.get("rIDPreviousAllocationPool", result["rIDAllocationPool"])[0])
+    # Mark the current pool as used up with no next pool. The next account
+    # creation then asks the RID master for a fresh pool.
+    message = ldb.Message(ldb.Dn(samdb, str(rid_set_dn)))
+    for attribute, value in (("rIDPreviousAllocationPool", pool),
+                             ("rIDAllocationPool", pool),
+                             ("rIDNextRID", pool >> 32)):
+        message[attribute] = ldb.MessageElement(str(value), ldb.FLAG_MOD_REPLACE, attribute)
+    samdb.modify(message)
+
+
+def new_invocation_id(samdb, ntds_dn):
+    invocation_id = str(uuid.uuid4())
+    message = ldb.Message(ldb.Dn(samdb, str(ntds_dn)))
+    message["invocationId"] = ldb.MessageElement(
+        ndr_pack(misc.GUID(invocation_id)), ldb.FLAG_MOD_REPLACE, "invocationId")
+    samdb.modify(message)
+    stored = single(samdb, str(ntds_dn), "invocationId")
+    if str(ndr_unpack(misc.GUID, stored)) != invocation_id:
+        raise RuntimeError("the new invocationId was not stored")
+    return invocation_id
+
+
+def main():
+    # Keep stdout for the report alone; Samba libraries may print progress.
+    report_stream = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    hostname = socket.gethostname()
+    unpack_backup()
+    lp = LoadParm()
+    lp.load("/etc/samba/smb.conf")
+    samdb = SamDB(url=lp.samdb_url(), session_info=system_session(), lp=lp)
+    old_invocation_id = samdb.get_invocation_id()
+    ntds_dn, age = check_preconditions(samdb, hostname)
+
+    remove_backup_markers(samdb)
+    save_uptodate_vectors(samdb)
+    discard_rid_pool(samdb)
+    invocation_id = new_invocation_id(samdb, ntds_dn)
+
+    # Local files of this DC as they were at backup time, with their ACLs.
+    # Nothing is exchanged with the other DC here.
+    local_share = lp.get("path", "sysvol") or os.path.join(DATA, "sysvol")
+    os.makedirs(local_share, exist_ok=True)
+    archive = os.path.join(UNPACK, "sysvol.tar.gz")
+    if os.path.isfile(archive):
+        backup_restore(archive, local_share, samdb, lp.configfile)
+    shutil.rmtree(UNPACK)
+
+    json.dump({
+        "ntds_dn": str(ntds_dn),
+        "old_invocation_id": old_invocation_id,
+        "invocation_id": invocation_id,
+        "backup_age_hours": round(age.total_seconds() / 3600, 1),
+    }, report_stream)
+    report_stream.write("\n")
+    report_stream.close()
+
+
+if __name__ == "__main__":
+    main()

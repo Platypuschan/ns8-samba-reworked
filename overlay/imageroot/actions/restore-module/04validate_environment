@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import ipaddress
 import json
 import os
 import sys
@@ -60,3 +61,22 @@ if any(field in request for field in credential_fields):
         if not request.get(field):
             reject_credential(field, "invalid_recovery_credentials",
                               "Supply both nonempty recovery credentials or omit both.")
+
+# Optional address for a remote DC whose backed-up address is not available
+# on the target node; 08validate_remote_ip checks it against this node.
+if "recovery_ipaddress" in request:
+    value = request["recovery_ipaddress"]
+    try:
+        if not isinstance(value, str):
+            raise ValueError
+        ipaddress.IPv4Address(value)
+    except ValueError:
+        print("recovery_ipaddress must be an IPv4 address.", file=sys.stderr)
+        agent.set_status("validation-failed")
+        json.dump([{
+            "field": "recovery_ipaddress",
+            "parameter": "recovery_ipaddress",
+            "value": value if isinstance(value, str) and value.isprintable() else "",
+            "error": "invalid_recovery_ipaddress",
+        }], sys.stdout)
+        sys.exit(2)

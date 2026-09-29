@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# First choice for a remote-joined DC: bring back the backed-up database under
+# the original name and address, like a snapshot, and let it catch up with the
+# surviving DC. Upstream 06copyenv has already renamed the DC for the other
+# branches; that name is kept for them if the snapshot is skipped or fails.
+
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+
+import agent
+
+
+request = json.load(sys.stdin)
+state = Path(os.environ["AGENT_STATE_DIR"])
+for name in ("remote-restore-joined", "remote-restore-mode",
+             "remote-restore-join-attempted", "remote-restore-snapshot.json"):
+    (state / name).unlink(missing_ok=True)
+if os.getenv("PROVISION_MODE") != "join-remote-domain":
+    sys.exit(0)
+
+podman = os.getenv("PODMAN_BIN", "/usr/bin/podman")
+image = os.environ["SAMBA_DC_IMAGE"]
+backup_environment = request["environment"]
+original_hostname = backup_environment.get("HOSTNAME", "")
+original_address = backup_environment.get("IPADDRESS", "")
+join_address = os.getenv("JOINADDRESS", "")
+
+
+def skip(reason):
+    print(f"Snapshot restore skipped: {reason}", file=sys.stderr)
+    sys.exit(0)
+
+
+def clear_database():
+    # Leave only the restored backup directory, as the rejoin and forced
+    # branches expect.
+    subprocess.run([
+        podman, "run", "--rm", "--network=none", "--log-driver=none",
+        "--volume=data:/var/lib/samba:z", "--entrypoint=[]", image,
+        "find", "/var/lib/samba", "-mindepth", "1", "-maxdepth", "1",
+        "!", "-name", "backup", "-exec", "rm", "-rf", "{}", "+",
+    ], check=True, stdout=subprocess.DEVNULL)
+
+
+if os.getenv("SERVER_ROLE", "dc") != "dc" or os.getenv("PROVISION_TYPE") != "join-domain":
+    skip("the backup is not a joined domain controller")
+if not (original_hostname and join_address and os.getenv("REALM")):
+    skip("the backup lacks the DC name, realm or surviving DC address")
+if os.getenv("IPADDRESS") != original_address:
+    skip(f"the backed-up address {original_address} is not available on this node")
+for port in (88, 389):
+    try:
+        socket.create_connection((join_address, port), timeout=5).close()
+    except OSError as error:
+        skip(f"the surviving DC {join_address} is not reachable on port {port} ({error})")
+
+print(f"Preparing a snapshot restore of {original_hostname}.", file=sys.stderr)
+try:
+    prepared = subprocess.run([
+        podman, "run", "--rm", "--network=none", "--log-driver=none",
+        "--replace", "--name=samba-snapshot-restore",
+        f"--hostname={original_hostname}",
+        "--volume=data:/var/lib/samba:z", "--volume=config:/etc/samba:z",
+        f"--volume={os.environ['AGENT_INSTALL_DIR']}/bin/prepare-snapshot-restore:"
+        "/run/prepare-snapshot-restore:ro,z",
+        "--entrypoint=[]", image, "/run/prepare-snapshot-restore",
+    ], stdout=subprocess.PIPE, text=True, timeout=900)
+    report = json.loads(prepared.stdout) if prepared.returncode == 0 else None
+except (subprocess.TimeoutExpired, json.JSONDecodeError):
+    report = None
+if report is None:
+    clear_database()
+    skip("the backed-up database could not be prepared")
+
+report["renamed_hostname"] = os.environ["HOSTNAME"]
+(state / "remote-restore-snapshot.json").write_text(json.dumps(report) + "\n")
+agent.set_env("HOSTNAME", original_hostname)
+print(f"Snapshot prepared: backup age {report['backup_age_hours']} h, new invocationId "
+      f"{report['invocation_id']}.", file=sys.stderr)

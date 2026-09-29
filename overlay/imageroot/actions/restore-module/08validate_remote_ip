@@ -8,6 +8,7 @@ import os
 import sys
 
 import agent
+import samba
 
 
 agent.set_weight(os.path.basename(__file__), 0)
@@ -15,19 +16,9 @@ request = json.load(sys.stdin)
 if request["environment"].get("PROVISION_MODE") != "join-remote-domain":
     sys.exit(0)
 
-# Upstream 06copyenv substitutes the node's WireGuard IP when the backed-up
-# address is unavailable. A remote DC cannot advertise that address to its
-# surviving peer or to clients in the other cluster.
-address = os.getenv("IPADDRESS", "")
-with agent.redis_connect(use_replica=True) as rdb:
-    cluster_network = ipaddress.ip_network(rdb.get("cluster/network"), strict=False)
 
-if not address or ipaddress.ip_address(address) in cluster_network:
-    print(
-        "Remote DC restore needs an available non-VPN IP address on the target "
-        "node. Assign the original address or restore on a suitable node.",
-        file=sys.stderr,
-    )
+def reject(address, message):
+    print(message, file=sys.stderr)
     agent.set_status("validation-failed")
     json.dump(
         [{"field": "environment", "parameter": "IPADDRESS", "value": address,
@@ -35,3 +26,43 @@ if not address or ipaddress.ip_address(address) in cluster_network:
         sys.stdout,
     )
     sys.exit(2)
+
+
+# Upstream 06copyenv keeps the backed-up address if this node has it, and
+# otherwise substitutes the node's WireGuard IP. A remote DC cannot advertise
+# that address to its surviving peer or to clients in the other cluster.
+address = os.getenv("IPADDRESS", "")
+with agent.redis_connect(use_replica=True) as rdb:
+    cluster_network = ipaddress.ip_network(rdb.get("cluster/network"), strict=False)
+
+
+def in_cluster_network(value):
+    return ipaddress.ip_address(value) in cluster_network
+
+
+recovery_address = request.get("recovery_ipaddress", "")
+if address and in_cluster_network(address) and recovery_address:
+    # The backed-up address is missing here; use the one the administrator
+    # chose. An empty address means upstream found a conflicting domain.
+    if in_cluster_network(recovery_address):
+        reject(recovery_address, "recovery_ipaddress lies in the cluster VPN network.")
+    samba.validate_ipaddress(recovery_address)
+    agent.set_env("IPADDRESS", recovery_address)
+    agent.unset_env("PREFIXLEN")
+    with agent.redis_connect(privileged=True) as prdb:
+        prdb.sadd(f"module/{os.environ['MODULE_ID']}/flags", "file_server")
+    print(f"The backed-up address {request['environment'].get('IPADDRESS', '')} is not "
+          f"available; using recovery_ipaddress {recovery_address}.", file=sys.stderr)
+    address = recovery_address
+
+if not address or in_cluster_network(address):
+    candidates = [
+        entry["ipaddress"] for entry in samba.ipaddress_list(skip_wg0=True)
+        if not in_cluster_network(entry["ipaddress"])
+    ]
+    reject(
+        address,
+        "Remote DC restore needs an available non-VPN IP address on the target "
+        "node. Assign the original address, or pass one of this node's addresses "
+        f"as recovery_ipaddress: {', '.join(candidates) or 'none found'}.",
+    )

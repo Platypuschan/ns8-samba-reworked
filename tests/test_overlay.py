@@ -96,12 +96,13 @@ for executable in (
     set_monitor / "50set",
     monitor_bin,
     repository / "overlay/imageroot/bin/join-domain-checked",
+    repository / "overlay/imageroot/bin/prepare-snapshot-restore",
     repository / "overlay/imageroot/update-module.d/25remote_join_role",
     repository / "overlay/imageroot/update-module.d/55replication_monitor",
     repository / "scripts/patch-ui.mjs",
     repository / "scripts/release-scope.sh",
     set_ipaddress / "02validate_remote_ip",
-    *(restore / name for name in ("04validate_environment", "07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor")),
+    *(restore / name for name in ("04validate_environment", "07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "45prepare_snapshot_restore", "46start_snapshot_restore", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor")),
 ):
     assert os.access(executable, os.X_OK), f"file is not executable: {executable}"
 
@@ -121,7 +122,10 @@ python_files = [
     restore / "07copy_custom_env",
     restore / "04validate_environment",
     restore / "08validate_remote_ip",
+    restore / "45prepare_snapshot_restore",
+    restore / "46start_snapshot_restore",
     restore / "55rename_forced_dc",
+    repository / "overlay/imageroot/bin/prepare-snapshot-restore",
     set_ipaddress / "02validate_remote_ip",
 ]
 for path in python_files:
@@ -206,7 +210,11 @@ assert not any("samba-dc" in path for path in overlay_paths)
 overlay_code = "\n".join(
     path.read_text(errors="replace")
     for path in (repository / "overlay").rglob("*")
-    if path.is_file() and path != restore / "60resume_state"
+    if path.is_file() and path not in (
+        restore / "60resume_state",
+        # Puts back this DC's own backed-up files; nothing is synchronized.
+        repository / "overlay/imageroot/bin/prepare-snapshot-restore",
+    )
 )
 assert "sysvol" not in overlay_code.lower()
 assert "logon script" not in overlay_code.lower()
@@ -266,7 +274,7 @@ if image_root is not None:
         image_root / "imageroot/bin/check-ad-replication"
     ).is_file()
     assert (image_root / "imageroot/bin/join-domain-checked").is_file()
-    for filename in ("04validate_environment", "07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor"):
+    for filename in ("04validate_environment", "07copy_custom_env", "08validate_remote_ip", "40restore_timescaledb", "45prepare_snapshot_restore", "46start_snapshot_restore", "50attempt_remote_rejoin", "55rename_forced_dc", "60resume_state", "85replication_monitor"):
         assert (image_root / "imageroot/actions/restore-module" / filename).is_file()
     assert (image_root / "imageroot/actions/set-ipaddress/02validate_remote_ip").is_file()
     assert not (image_root / "imageroot/actions/restore-module/validate-input.json").exists()

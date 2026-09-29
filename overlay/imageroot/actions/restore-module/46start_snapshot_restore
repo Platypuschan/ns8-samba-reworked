@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Start the prepared snapshot and keep it only if replication works in both
+# directions: this DC pulled from its partner, and the partner pulled this
+# DC's new invocationId. Otherwise discard it for the rejoin/forced branches.
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+import agent
+
+
+state = Path(os.environ["AGENT_STATE_DIR"])
+prepared = state / "remote-restore-snapshot.json"
+if os.getenv("PROVISION_MODE") != "join-remote-domain" or not prepared.exists():
+    sys.exit(0)
+
+report = json.loads(prepared.read_text())
+podman = os.getenv("PODMAN_BIN", "/usr/bin/podman")
+image = os.environ["SAMBA_DC_IMAGE"]
+join_address = os.environ["JOINADDRESS"]
+INBOUND_TIMEOUT = int(os.getenv("SNAPSHOT_INBOUND_TIMEOUT", "300"))
+OUTBOUND_TIMEOUT = int(os.getenv("SNAPSHOT_OUTBOUND_TIMEOUT", "900"))
+
+
+def run(*command, timeout=60):
+    try:
+        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def is_active():
+    result = run("systemctl", "--user", "is-active", "--quiet", "samba-dc.service")
+    return result is not None and result.returncode == 0
+
+
+def give_up(reason):
+    print(f"Snapshot restore failed: {reason}", file=sys.stderr)
+    run("systemctl", "--user", "stop", "samba-dc.service", timeout=120)
+    if is_active():
+        run(podman, "stop", "--ignore", "samba-dc", timeout=120)
+        run("systemctl", "--user", "stop", "samba-dc.service", timeout=120)
+        if is_active():
+            print("The snapshot DC could not be stopped; cannot replace its database.",
+                  file=sys.stderr)
+            sys.exit(1)
+    subprocess.run([
+        podman, "run", "--rm", "--network=none", "--log-driver=none",
+        "--volume=data:/var/lib/samba:z", "--entrypoint=[]", image,
+        "find", "/var/lib/samba", "-mindepth", "1", "-maxdepth", "1",
+        "!", "-name", "backup", "-exec", "rm", "-rf", "{}", "+",
+    ], check=True, stdout=subprocess.DEVNULL)
+    prepared.unlink()
+    agent.set_env("HOSTNAME", report["renamed_hostname"])
+    print(f"Continuing as {report['renamed_hostname']} with a rejoin or forced restore.",
+          file=sys.stderr)
+    sys.exit(0)
+
+
+def succeeded(links):
+    # samba-tool reports "last success" as a date string, or "NTTIME(0)".
+    for link in links or []:
+        last = link.get("last success")
+        if isinstance(last, (int, float)):
+            seen = last > 0
+        else:
+            seen = isinstance(last, str) and last not in ("", "NTTIME(0)", "0")
+        if seen and str(link.get("consecutive failures", 1)) == "0" and \
+                link.get("is deleted") is not True:
+            return True
+    return False
+
+
+def wait_for(check, timeout, interval):
+    deadline = time.monotonic() + timeout
+    while True:
+        if check():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
+def inbound_ok():
+    result = run(podman, "exec", "samba-dc", "samba-tool", "drs", "showrepl", "--json",
+                 timeout=30)
+    if result is None or result.returncode != 0:
+        return False
+    try:
+        return succeeded(json.loads(result.stdout).get("repsFrom"))
+    except (ValueError, AttributeError):
+        return False
+
+
+def partner_has_new_invocation_id():
+    # Authenticate with this DC's computer account and read our NTDS object
+    # on the partner. It carries the new invocationId only after the partner
+    # replicated from this DC.
+    result = run(podman, "exec", "samba-dc", "ldbsearch", "-P",
+                 "-H", f"ldap://{join_address}", "-b", report["ntds_dn"], "-s", "base",
+                 "invocationId", timeout=30)
+    if result is None or result.returncode != 0:
+        return False
+    return f"invocationId: {report['invocation_id']}" in result.stdout
+
+
+result = run("systemctl", "--user", "enable", "--now", "samba-dc.service", timeout=120)
+if result is None or result.returncode != 0:
+    give_up("the DC did not start")
+if not wait_for(inbound_ok, INBOUND_TIMEOUT, 5):
+    give_up("no successful inbound replication from the surviving DC")
+print("Inbound replication works; waiting for the surviving DC to replicate from us.",
+      file=sys.stderr)
+if not wait_for(partner_has_new_invocation_id, OUTBOUND_TIMEOUT, 10):
+    give_up("the surviving DC did not replicate from this DC")
+
+(state / "remote-restore-joined").write_text("snapshot\n")
+(state / "remote-restore-mode").write_text("snapshot\n")
+print(f"Snapshot restore complete: {os.environ['HOSTNAME']} is back in the surviving "
+      "domain with its original name and address.", file=sys.stderr)
