@@ -208,12 +208,15 @@ class RemoteLifecycleTests(unittest.TestCase):
         rdb = mock.MagicMock()
         rdb.__enter__.return_value.get.return_value = "10.5.4.0/24"
         agent.redis_connect = mock.Mock(return_value=rdb)
+        samba = types.ModuleType("samba")
+        samba.ipaddress_list = mock.Mock(return_value=[
+            {"ipaddress": "10.5.4.7", "label": "wg0"}, {"ipaddress": "192.0.2.9", "label": "eth1"}])
         request = {"environment": {"PROVISION_MODE": "join-remote-domain"}}
         with mock.patch.dict(os.environ, {"IPADDRESS": "10.5.4.7"}):
             with self.assertRaises(SystemExit) as caught:
                 self.run_action(
                     ACTIONS / "restore-module/08validate_remote_ip", request,
-                    {"agent": agent},
+                    {"agent": agent, "samba": samba},
                 )
         self.assertEqual(caught.exception.code, 2)
         agent.set_status.assert_called_once_with("validation-failed")
@@ -221,16 +224,21 @@ class RemoteLifecycleTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"IPADDRESS": ""}):
             with self.assertRaises(SystemExit) as caught:
                 self.run_action(ACTIONS / "restore-module/08validate_remote_ip",
-                                request, {"agent": agent})
+                                request, {"agent": agent, "samba": samba})
         self.assertEqual(caught.exception.code, 2)
 
         with mock.patch.dict(os.environ, {"IPADDRESS": "192.0.2.4"}):
             self.run_action(ACTIONS / "restore-module/08validate_remote_ip",
-                            request, {"agent": agent})
+                            request, {"agent": agent, "samba": samba})
         self.assertEqual(agent.set_status.call_count, 2)
 
+    # samba-tool drs showrepl --json formats timestamps with nttime2string.
+    SAMBA_SUCCESS = '"Mon Sep 28 19:12:25 2026 UTC"'
+    SAMBA_NEVER = '"NTTIME(0)"'
+
     def run_remote_restore(self, join_exit=0, drs_exit=0, drs_failures=0,
-                           drs_to_failures=0, drs_to_last_success=1,
+                           drs_last_success=SAMBA_SUCCESS, drs_to_failures=0,
+                           drs_to_last_success=SAMBA_SUCCESS,
                            credentials=None, restore_audit=False):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -260,7 +268,7 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "fi\n"
                 "if [[ $* == *'--entrypoint=/bin/bash'* ]]; then exit 0; fi\n"
                 "if [[ $* == *'drs showrepl --json'* ]]; then\n"
-                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s,\"last success\":1}],\"repsTo\":[{\"consecutive failures\":%s,\"last success\":%s}]}\\n' \"$FAKE_DRS_FAILURES\" \"$FAKE_DRS_TO_FAILURES\" \"$FAKE_DRS_TO_LAST_SUCCESS\"\n"
+                "  printf '{\"repsFrom\":[{\"consecutive failures\":%s,\"last success\":%s}],\"repsTo\":[{\"consecutive failures\":%s,\"last success\":%s}]}\\n' \"$FAKE_DRS_FAILURES\" \"$FAKE_DRS_LAST_SUCCESS\" \"$FAKE_DRS_TO_FAILURES\" \"$FAKE_DRS_TO_LAST_SUCCESS\"\n"
                 "  exit \"$FAKE_DRS_EXIT\"\n"
                 "fi\n"
                 "if [[ $* == *'--workdir=/var/lib/samba'* ]]; then\n"
@@ -289,8 +297,9 @@ class RemoteLifecycleTests(unittest.TestCase):
                 "FAKE_JOIN_EXIT": str(join_exit),
                 "FAKE_DRS_EXIT": str(drs_exit),
                 "FAKE_DRS_FAILURES": str(drs_failures),
+                "FAKE_DRS_LAST_SUCCESS": drs_last_success,
                 "FAKE_DRS_TO_FAILURES": str(drs_to_failures),
-                "FAKE_DRS_TO_LAST_SUCCESS": str(drs_to_last_success),
+                "FAKE_DRS_TO_LAST_SUCCESS": drs_to_last_success,
                 "AGENT_STATE_DIR": str(work),
                 "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot"),
                 "PROVISION_MODE": "join-remote-domain",
@@ -371,8 +380,15 @@ class RemoteLifecycleTests(unittest.TestCase):
         self.assertIn("systemctl --user stop samba-dc.service", calls)
         self.assertIn("samba-tool domain backup restore", calls)
 
+    def test_remote_restore_forces_domain_backup_without_inbound_success(self):
+        calls, mode, _, _, hostname = self.run_remote_restore(drs_last_success=self.SAMBA_NEVER)
+        self.assertEqual(mode, "forced\n")
+        self.assertEqual(hostname, "dc2r2.ad.example.org")
+        self.assertIn("samba-tool domain backup restore", calls)
+
     def test_remote_restore_warns_if_outbound_status_is_not_yet_confirmed(self):
-        calls, mode, _, logs, hostname = self.run_remote_restore(drs_to_last_success=0)
+        calls, mode, _, logs, hostname = self.run_remote_restore(
+            drs_to_last_success=self.SAMBA_NEVER)
         self.assertEqual(mode, "joined\n")
         self.assertEqual(hostname, "dc2r1.ad.example.org")
         self.assertNotIn("samba-tool domain backup restore", calls)
@@ -492,6 +508,195 @@ class RemoteLifecycleTests(unittest.TestCase):
             self.assertEqual(base64.b64decode(values["ADMINPASS_B64"]).decode(), "\tsecret\t")
             self.assertNotIn("secret", stored.read_text())
 
+
+    def test_restore_rejects_invalid_recovery_ipaddress_before_copy(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        environment = {"environment": {"PROVISION_MODE": "join-remote-domain"}}
+        for value in ("not-an-ip", "192.0.2.300", 42, "2001:db8::1"):
+            with self.subTest(value=value), self.assertRaises(SystemExit) as caught:
+                self.run_action(ACTIONS / "restore-module/04validate_environment",
+                                {**environment, "recovery_ipaddress": value}, {"agent": agent})
+            self.assertEqual(caught.exception.code, 2)
+        agent.set_status.assert_called_with("validation-failed")
+        self.run_action(ACTIONS / "restore-module/04validate_environment",
+                        {**environment, "recovery_ipaddress": "192.0.2.9"}, {"agent": agent})
+
+    def test_remote_restore_uses_recovery_ipaddress_instead_of_vpn_fallback(self):
+        agent = types.ModuleType("agent")
+        agent.set_weight = mock.Mock()
+        agent.set_status = mock.Mock()
+        agent.set_env = mock.Mock()
+        agent.unset_env = mock.Mock()
+        rdb = mock.MagicMock()
+        rdb.__enter__.return_value.get.return_value = "10.5.4.0/24"
+        agent.redis_connect = mock.Mock(return_value=rdb)
+        samba = types.ModuleType("samba")
+        samba.validate_ipaddress = mock.Mock()
+        samba.ipaddress_list = mock.Mock(return_value=[])
+        request = {"environment": {"PROVISION_MODE": "join-remote-domain",
+                                   "IPADDRESS": "192.0.2.4"},
+                   "recovery_ipaddress": "192.0.2.9"}
+        env = {"IPADDRESS": "10.5.4.7", "MODULE_ID": "samba1"}
+        with mock.patch.dict(os.environ, env):
+            self.run_action(ACTIONS / "restore-module/08validate_remote_ip", request,
+                            {"agent": agent, "samba": samba})
+        samba.validate_ipaddress.assert_called_once_with("192.0.2.9")
+        agent.set_env.assert_called_once_with("IPADDRESS", "192.0.2.9")
+        agent.unset_env.assert_called_once_with("PREFIXLEN")
+        rdb.__enter__.return_value.sadd.assert_called_once_with("module/samba1/flags", "file_server")
+        agent.set_status.assert_not_called()
+
+        # The backed-up address wins when upstream kept it.
+        agent.set_env.reset_mock()
+        with mock.patch.dict(os.environ, {**env, "IPADDRESS": "192.0.2.4"}):
+            self.run_action(ACTIONS / "restore-module/08validate_remote_ip", request,
+                            {"agent": agent, "samba": samba})
+        agent.set_env.assert_not_called()
+
+        # Neither a VPN address nor an empty upstream result can be overridden.
+        for address, recovery in (("10.5.4.7", "10.5.4.8"), ("", "192.0.2.9")):
+            with self.subTest(address=address), mock.patch.dict(
+                    os.environ, {**env, "IPADDRESS": address}):
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_action(ACTIONS / "restore-module/08validate_remote_ip",
+                                    {**request, "recovery_ipaddress": recovery},
+                                    {"agent": agent, "samba": samba})
+                self.assertEqual(caught.exception.code, 2)
+        agent.set_env.assert_not_called()
+
+    SNAPSHOT_REPORT = {"ntds_dn": "CN=NTDS Settings,CN=DC2,CN=Servers,CN=Default-First-Site-Name,"
+                                  "CN=Sites,CN=Configuration,DC=ad,DC=example,DC=org",
+                       "old_invocation_id": "11111111-1111-1111-1111-111111111111",
+                       "invocation_id": "22222222-2222-2222-2222-222222222222",
+                       "backup_age_hours": 5.0}
+
+    def run_snapshot_restore(self, prepare_exit=0, inbound=True, outbound=True,
+                             address="192.0.2.4", reachable=True):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            bin_dir = work / "bin"
+            bin_dir.mkdir()
+            calls = work / "calls"
+            fake_podman = bin_dir / "podman"
+            fake_podman.write_text(
+                "#!/bin/bash\n"
+                "printf 'podman %s\\n' \"$*\" >> \"$FAKE_CALLS\"\n"
+                "if [[ $* == *'/run/prepare-snapshot-restore'* ]]; then\n"
+                "  [[ $FAKE_PREPARE_EXIT == 0 ]] && printf '%s\\n' \"$FAKE_REPORT\"\n"
+                "  exit \"$FAKE_PREPARE_EXIT\"\n"
+                "fi\n"
+                "if [[ $* == *'drs showrepl --json'* ]]; then\n"
+                "  if [[ $FAKE_INBOUND == 1 ]]; then last='\"Mon Sep 28 19:12:25 2026 UTC\"'; else last='\"NTTIME(0)\"'; fi\n"
+                "  printf '{\"repsFrom\":[{\"consecutive failures\":0,\"last success\":%s}]}\\n' \"$last\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ $* == *'ldbsearch -P'* ]]; then\n"
+                "  if [[ $FAKE_OUTBOUND == 1 ]]; then id=22222222-2222-2222-2222-222222222222; else id=11111111-1111-1111-1111-111111111111; fi\n"
+                "  printf 'dn: x\\ninvocationId: %s\\n' \"$id\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n"
+            )
+            fake_podman.chmod(0o755)
+            systemctl = bin_dir / "systemctl"
+            systemctl.write_text(
+                "#!/bin/bash\n"
+                "printf 'systemctl %s\\n' \"$*\" >> \"$FAKE_CALLS\"\n"
+                "if [[ $* == *'is-active --quiet'* ]]; then exit 1; fi\n"
+            )
+            systemctl.chmod(0o755)
+            environment = {
+                "PATH": str(bin_dir) + ":" + os.environ["PATH"],
+                "PODMAN_BIN": str(fake_podman),
+                "FAKE_CALLS": str(calls),
+                "FAKE_PREPARE_EXIT": str(prepare_exit),
+                "FAKE_REPORT": json.dumps(self.SNAPSHOT_REPORT),
+                "FAKE_INBOUND": "1" if inbound else "0",
+                "FAKE_OUTBOUND": "1" if outbound else "0",
+                "SNAPSHOT_INBOUND_TIMEOUT": "0",
+                "SNAPSHOT_OUTBOUND_TIMEOUT": "0",
+                "AGENT_STATE_DIR": str(work),
+                "AGENT_INSTALL_DIR": str(ROOT / "overlay/imageroot"),
+                "PROVISION_MODE": "join-remote-domain",
+                "PROVISION_TYPE": "join-domain",
+                "SERVER_ROLE": "dc",
+                "IPADDRESS": address,
+                "HOSTNAME": "dc2r1.ad.example.org",
+                "REALM": "AD.EXAMPLE.ORG",
+                "JOINADDRESS": "192.0.2.3",
+                "SAMBA_DC_IMAGE": "samba:test",
+            }
+            request = {"environment": {"HOSTNAME": "dc2.ad.example.org", "IPADDRESS": "192.0.2.4",
+                                       "PROVISION_MODE": "join-remote-domain"}}
+            (work / "remote-restore-mode").write_text("forced\n")
+            agent = types.ModuleType("agent")
+            agent.set_env = mock.Mock(
+                side_effect=lambda name, value: os.environ.__setitem__(name, value))
+            connect = mock.MagicMock()
+            if not reachable:
+                connect.side_effect = OSError("unreachable")
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch("socket.create_connection", connect):
+                for step in ("45prepare_snapshot_restore", "46start_snapshot_restore"):
+                    try:
+                        self.run_action(ACTIONS / "restore-module" / step, request,
+                                        {"agent": agent})
+                    except SystemExit as caught:
+                        self.assertEqual(caught.code, 0)
+                hostname = os.environ["HOSTNAME"]
+                rejoin = subprocess.run(
+                    ["bash", str(ACTIONS / "restore-module/50attempt_remote_rejoin")],
+                    input="{}", text=True, capture_output=True, cwd=work,
+                    env={**os.environ, "SVCUSER": "", "SVCPASS": ""}, check=False)
+                self.assertEqual(rejoin.returncode, 0, rejoin.stderr)
+            mode = work / "remote-restore-mode"
+            return (calls.read_text() if calls.exists() else "",
+                    mode.read_text() if mode.exists() else None, hostname,
+                    (work / "remote-restore-snapshot.json").exists())
+
+    def test_snapshot_restore_keeps_name_and_address_when_replication_works(self):
+        calls, mode, hostname, prepared = self.run_snapshot_restore()
+        self.assertEqual(mode, "snapshot\n")
+        self.assertEqual(hostname, "dc2.ad.example.org")
+        self.assertIn("--hostname=dc2.ad.example.org", calls)
+        self.assertIn("--network=none", calls)
+        self.assertIn("systemctl --user enable --now samba-dc.service", calls)
+        self.assertIn("ldbsearch -P -H ldap://192.0.2.3", calls)
+        self.assertNotIn("find /var/lib/samba", calls)
+        self.assertNotIn("/run/join-domain-checked", calls)
+        self.assertTrue(prepared)
+
+    def test_snapshot_restore_falls_back_without_outbound_replication(self):
+        calls, mode, hostname, prepared = self.run_snapshot_restore(outbound=False)
+        self.assertIsNone(mode)
+        self.assertEqual(hostname, "dc2r1.ad.example.org")
+        self.assertIn("systemctl --user stop samba-dc.service", calls)
+        self.assertIn("find /var/lib/samba -mindepth 1 -maxdepth 1 ! -name backup", calls)
+        self.assertFalse(prepared)
+
+    def test_snapshot_restore_falls_back_without_inbound_replication(self):
+        calls, mode, hostname, _ = self.run_snapshot_restore(inbound=False)
+        self.assertIsNone(mode)
+        self.assertEqual(hostname, "dc2r1.ad.example.org")
+        self.assertNotIn("ldbsearch", calls)
+        self.assertIn("find /var/lib/samba", calls)
+
+    def test_snapshot_restore_skips_refused_or_impossible_snapshots(self):
+        calls, mode, hostname, prepared = self.run_snapshot_restore(prepare_exit=3)
+        self.assertIsNone(mode)
+        self.assertEqual(hostname, "dc2r1.ad.example.org")
+        self.assertIn("find /var/lib/samba", calls)
+        self.assertNotIn("samba-dc.service", calls)
+        self.assertFalse(prepared)
+        for options in ({"address": "192.0.2.9"}, {"reachable": False}):
+            with self.subTest(**options):
+                calls, mode, hostname, prepared = self.run_snapshot_restore(**options)
+                self.assertIsNone(mode)
+                self.assertEqual(hostname, "dc2r1.ad.example.org")
+                self.assertNotIn("prepare-snapshot-restore", calls)
+                self.assertFalse(prepared)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,104 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Minimal stand-in for "systemctl --user" and the upstream samba-dc.service
+# unit (NethServer/ns8-samba imageroot/systemd/user/samba-dc.service).
+set -euo pipefail
+
+[[ ${1:-} == --user ]] && shift
+command=${1:?}
+shift
+now=
+units=()
+for argument; do
+    case ${argument} in
+        --now) now=1 ;;
+        --quiet) ;;
+        *.service) units+=("${argument}") ;;
+        *) printf 'systemctl stand-in: unsupported argument %s\n' "${argument}" >&2; exit 1 ;;
+    esac
+done
+if [[ ${units[*]} != samba-dc.service ]]; then
+    printf 'systemctl stand-in: unsupported unit %s\n' "${units[*]}" >&2
+    exit 1
+fi
+
+start_samba_dc() {
+    # ExecCondition of the upstream unit
+    [[ -n ${IPADDRESS:-} ]] || return 0
+    # conmon inherits the descriptors of "podman run --detach". Keep them off
+    # the caller's pipes, or a caller piping into tee never sees EOF.
+    local errors
+    errors=$(mktemp)
+    trap 'rm -f "${errors}"' RETURN
+    init=()
+    if [[ -x /usr/libexec/podman/catatonit || -x /usr/bin/catatonit ]]; then
+        init=(--init)
+    fi
+    /usr/bin/podman run \
+        --dns=none \
+        --no-hosts \
+        --detach \
+        --network="${IT_NETWORK:?}" \
+        --ip="${IPADDRESS}" \
+        --hostname="${HOSTNAME:?}" \
+        --replace --name=samba-dc \
+        --env=REALM \
+        --env=IPADDRESS \
+        --env=PREFIXLEN \
+        --env=NBDOMAIN \
+        --env=SAMBA_LOGLEVEL \
+        --env=SERVER_ROLE \
+        --env=DNS1ADDRESS \
+        --env=DNS2ADDRESS \
+        --env=NBALIAS \
+        --volume=data:/var/lib/samba:z \
+        --volume=config:/etc/samba:z \
+        --volume=shares:/srv/shares \
+        --volume=homes:/srv/homes \
+        "${init[@]}" \
+        "${SAMBA_DC_IMAGE:?}" </dev/null >/dev/null 2>"${errors}" || {
+        cat "${errors}" >&2
+        return 1
+    }
+    # ExecStartPost: DNS, Kerberos, LDAP and global catalog must accept TCP
+    # within systemd's default start timeout of 90 seconds.
+    local deadline=$((SECONDS + 90))
+    for port in 53 88 389 3268; do
+        until (exec 3<>"/dev/tcp/${IPADDRESS}/${port}") 2>/dev/null; do
+            if [[ $(/usr/bin/podman container inspect -f '{{.State.Running}}' samba-dc 2>/dev/null) != true ]]; then
+                printf 'samba-dc exited during startup\n' >&2
+                /usr/bin/podman logs --tail 80 samba-dc >&2 || true
+                return 1
+            fi
+            if ((SECONDS >= deadline)); then
+                printf 'samba-dc start timed out waiting for port %s\n' "${port}" >&2
+                /usr/bin/podman logs --tail 80 samba-dc >&2 || true
+                /usr/bin/podman stop --ignore -t 10 samba-dc >/dev/null || true
+                return 1
+            fi
+            sleep 2
+        done
+    done
+}
+
+case ${command} in
+    enable)
+        [[ -z ${now} ]] || start_samba_dc
+        ;;
+    start)
+        start_samba_dc
+        ;;
+    stop)
+        /usr/bin/podman stop --ignore -t 10 samba-dc >/dev/null
+        /usr/bin/podman rm --ignore --force samba-dc >/dev/null
+        ;;
+    is-active)
+        [[ $(/usr/bin/podman container inspect -f '{{.State.Running}}' samba-dc 2>/dev/null) == true ]]
+        ;;
+    *)
+        printf 'systemctl stand-in: unsupported command %s\n' "${command}" >&2
+        exit 1
+        ;;
+esac

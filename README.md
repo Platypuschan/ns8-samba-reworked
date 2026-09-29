@@ -260,52 +260,53 @@ missing GitHub release for that tag. Do not rebuild the same version to repair
 the release metadata.
 
 The settings UI patch uses explicit source anchors. SHA-256 checks protect
-the replaced setup wizard and join script from silent upstream changes. Either
-change requires review and a deliberate hash update before a candidate builds.
+the replaced setup wizard, join script and state restore, and the upstream
+restore step whose address and name choices the remote-DC restore builds on,
+from silent upstream changes. Any such change requires review and a
+deliberate hash update before a candidate builds.
 
 ## Restore of a remote DC
 
-For a backup made with `PROVISION_MODE=join-remote-domain`, restore first tries
-to join a new DC to the saved `JOINADDRESS` with the saved `SVCUSER` and
-`SVCPASS`. It uses the corrected join script and requires a local AD database,
-a started DC, and successful inbound replication. An outbound DRS notification
-is checked and logged separately; its absence does not force a split. A
-successful join skips the offline domain archive. The restored
-DC receives a new name with an `rN` suffix, as in the
-upstream restore flow. The backup does not contain a reusable local DC database,
-so an old computer account alone cannot resume the original DC.
+For a backup made with `PROVISION_MODE=join-remote-domain`, restore tries, in
+this order:
 
-The default `ldapservice` account usually lacks DC join permission. The normal
-cluster restore does not accept a one-time domain administrator password. In
-that case, or if the join/start/DRS check fails, restore **automatically forces
-an independent domain restore** from the offline archive and starts the DC.
-After an attempted join, the forced copy receives another new DC name rather
-than reusing the name that may remain registered on the surviving DC.
-This may create two divergent copies of the same domain if another DC is still
-live. Authentication against the restored DC remains available, but changes
-made on the other copy will not automatically appear here. Decide which copy
-to keep before reconnecting replication or making directory changes.
+1. **Snapshot restore:** the DC returns under its original name, address and
+   computer account and catches up by replication. It gets a new
+   invocationId and a fresh RID pool first, so the surviving DC accepts its
+   new changes and no RID is issued twice. No credentials are needed. It is
+   used only if the original address is available, the surviving DC is
+   reachable, the DC held no FSMO role and the backup is younger than the
+   tombstone lifetime; it is kept only after replication in both directions
+   is confirmed.
+2. **Rejoin under a new name** (`rN` suffix, e.g. `dc2r1`) with one-time
+   domain administrator credentials, or with the saved `ldapservice` account,
+   which usually lacks join permission.
+3. **Forced restore:** an independent copy of the domain from the offline
+   archive under another new name. No credentials are needed. This may create
+   two divergent copies of the same domain if another DC is still live.
+   Authentication against the restored DC remains available, but changes made
+   on the other copy will not automatically appear here. Decide which copy to
+   keep before reconnecting replication or making directory changes.
 
 An administrator orchestrating the module-level `restore-module` action
-directly may pass `recovery_adminuser` and `recovery_adminpass` in its request
-alongside the usual backup repository, path, snapshot, and environment fields.
-These credentials are used only for the join attempt and are not written to
-the module environment or backup. Supply both values or omit both: malformed
-one-time credentials (including line breaks or a tab in the user name) stop
-the restore before it copies the backup or attempts a join. Passwords with
-tabs are passed intact. The standard cluster restore does not forward these
-fields. The result is recorded in
-`state/remote-restore-mode` (`joined` or `forced`) and in the restore log.
-The overlay's monitoring settings, including its ntfy token, are preserved.
-If the original IP address cannot be assigned on the target node, upstream
-substitutes the node's cluster VPN address. This overlay refuses remote DC
-restores before either branch starts if the resulting address is empty or in
-the cluster VPN range. Restore on a node with an available, reachable non-VPN
-address. A failed join may leave its computer account, server/NTDS Settings
-object, and DNS A/SRV records in the surviving domain; inspect and clean them
-manually before another join. Restore does not delete those remote objects.
-The local DRS view alone cannot prove that the surviving DC pulled changes
-from the new DC; check its replication status after a successful restore.
+directly may pass `recovery_adminuser` and `recovery_adminpass` for step 2,
+and `recovery_ipaddress` if the original address is not available on the
+target node, alongside the usual backup repository, path, snapshot, and
+environment fields. The credentials are used only for the join attempt and are
+not written to the module environment or backup. Supply both values or omit
+both: malformed one-time credentials (including line breaks or a tab in the
+user name) or an invalid address stop the restore before it copies the backup.
+Passwords with tabs are passed intact. The standard cluster restore does not
+forward these fields. The result is recorded in `state/remote-restore-mode`
+(`snapshot`, `joined` or `forced`) and in the restore log. The overlay's
+monitoring settings, including its ntfy token, are preserved.
+
+If the original address cannot be assigned on the target node and no
+`recovery_ipaddress` is given, upstream would substitute the node's cluster VPN
+address; this overlay refuses such restores before any step starts. After a
+rejoin or forced restore, the previous DC name and any objects of a failed join
+stay in the surviving domain; remove them there. See
+[docs/OPERATIONS.md](docs/OPERATIONS.md#restoring-a-remote-joined-dc).
 Changing the address later with `set-ipaddress` also rejects the cluster VPN
 range for remote-joined DCs.
 
