@@ -212,9 +212,10 @@ start_dc1() {
     podman run --detach --name=dc1 --replace --network="${IT_NETWORK}" --ip="${a_ip}" \
         --hostname="dc1.${domain}" --dns=none --no-hosts \
         --env=REALM="${realm}" --env=IPADDRESS="${a_ip}" --env=NBDOMAIN="${nbdomain}" \
+        ${a_loglevel:+"--env=SAMBA_LOGLEVEL=${a_loglevel}"} \
         --volume=a-data:/var/lib/samba:z --volume=a-config:/etc/samba:z \
         --volume=a-shares:/srv/shares --volume=a-homes:/srv/homes \
-        "${image}" >/dev/null
+        "${image}" </dev/null >/dev/null 2>&1
     local port
     for port in 53 88 389 3268; do
         poll 180 bash -c "exec 3<>/dev/tcp/${a_ip}/${port}" || return 1
@@ -411,6 +412,9 @@ restore_b() {
 
 #######################################################################
 section "Test 4: restore DC B while DC A is alive (rejoin)"
+# Verbose authentication and DRS logging for diagnosing the rejoined DC.
+debug_loglevel='2 auth:5 auth_audit:3 drs_repl:4 rpc_srv:4 kerberos:5 dsdb:3'
+export SAMBA_LOGLEVEL=${debug_loglevel}
 restore_b "${admin_pass}" > "${out}/restore-rejoin.log" 2>&1
 code=$?
 cat "${out}/restore-rejoin.log"
@@ -430,22 +434,28 @@ if on_a samba-tool drs replicate dc1 dc2 "${basedn}" > "${out}/dc1-pull-from-dc2
 else
     info "DC A cannot pull from the rejoined DC: $(tail -n 1 "${out}/dc1-pull-from-dc2.txt")"
 fi
+podman logs --tail 1500 samba-dc > "${out}/dc2-after-rejoin.log" 2>&1
 info "DC A inbound view after rejoin: $(jq -c '[.repsFrom[]? | {DSA, guid: .["DSA objectGUID"], deleted: .["is deleted"], fails: .["consecutive failures"], msg: .["last attempt message"]}] | unique' "${out}/showrepl-dc1-after-rejoin.json" 2>/dev/null)"
 # Hypothesis: DC A's running Samba still holds a Kerberos service ticket for
-# dc2 encrypted with the replaced DC2$ account key. A restart drops it.
+# dc2 encrypted with the replaced DC2$ account key. Recreating the container,
+# as the NS8 unit does, drops it.
 if ! replication_clean dc1 >/dev/null 2>&1; then
-    podman restart -t 10 dc1 >/dev/null
-    for port in 53 88 389 3268; do poll 180 bash -c "exec 3<>/dev/tcp/${a_ip}/${port}"; done
+    podman stop -t 10 dc1 >/dev/null
+    a_loglevel=${debug_loglevel}
+    start_dc1 || info "DC A did not come back after recreation"
     if poll 300 user_exists dc1 itest-after-rejoin && poll 300 replication_clean dc1; then
         info "Restarting DC A's Samba fixes replication from the rejoined DC"
     else
         info "Restarting DC A's Samba does not fix replication from the rejoined DC"
         showrepl dc1 > "${out}/showrepl-dc1-after-restart.json" 2>&1
+        podman logs --tail 1500 dc1 > "${out}/dc1-after-restart.log" 2>&1
+        podman logs --tail 1500 samba-dc > "${out}/dc2-after-dc1-restart.log" 2>&1
     fi
 fi
 
 #######################################################################
 section "Test 5: restore DC B while DC A is down (forced)"
+unset SAMBA_LOGLEVEL a_loglevel
 podman stop -t 10 dc1 >/dev/null
 restore_b > "${out}/restore-forced.log" 2>&1
 code=$?
