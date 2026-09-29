@@ -40,7 +40,7 @@ jobs:
       - name: Prepare logs
         if: always()
         run: |
-          sudo rm -rf "${RUNNER_TEMP}/samba-it/work/backup"
+          sudo rm -rf "${RUNNER_TEMP}/samba-it/work/backup" "${RUNNER_TEMP}"/samba-it/work/ns8-samba-*
           sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/samba-it"
 
       - name: Upload logs
