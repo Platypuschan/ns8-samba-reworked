@@ -122,9 +122,11 @@ step is skipped then, because it keeps the original address. Without
 VPN, the restore fails before any branch starts. Monitoring settings from the
 backup are retained.
 
-During provisioning the module bind-mounts a corrected copy of the upstream
-`join-domain` script into the official Samba runtime image. This preserves
-the actual `samba-tool domain join` exit code before the DC is started. After
+During provisioning the module bind-mounts a copy of the upstream
+`join-domain` script into the official Samba runtime image. It reads the
+administrator name and password from separate variables, so a password may
+contain a tab; like upstream since 3.5.1 it returns the actual
+`samba-tool domain join` exit code before the DC is started. After
 installation, check both inbound and outbound replication on the running DC.
 
 ## Removal

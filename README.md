@@ -13,8 +13,9 @@ NS8 cluster. Only Active Directory data is replicated by Samba.
 
 - Base image: `ghcr.io/nethserver/samba`, pinned by `UPSTREAM_VERSION`.
 - Runtime: the unmodified official `samba-dc` image selected by the base
-  module's `org.nethserver.images` label. Provisioning bind-mounts a corrected
-  copy of its `join-domain` script to preserve the actual Samba exit status.
+  module's `org.nethserver.images` label. Provisioning bind-mounts a copy of
+  its `join-domain` script that passes the join password unchanged, including
+  tab characters.
 - Added API action: `configure-remote-domain`.
 - LDAP bind identity: the existing `ldapservice` user and password from the
   source NS8 Samba provider.
