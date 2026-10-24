@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Based on NethServer/ns8-samba 3.5.0 samba-dc/usr/local/sbin/join-domain.
+# Based on NethServer/ns8-samba 3.5.1 samba-dc/usr/local/sbin/join-domain.
+# Functionally differs only in reading the credentials from separate base64 variables, so
+# a password may contain a tab.
 # Copyright (C) 2022 Nethesis S.r.l.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
