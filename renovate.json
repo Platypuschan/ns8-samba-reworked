@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "labels": [
+    "dependencies"
+  ],
+  "vulnerabilityAlerts": {
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null
+  },
+  "description": [
+    "UPSTREAM_VERSION and CUSTOM_VERSION are driven by .github/workflows/upstream-release.yml (nightly upstream tracking and release), not by Renovate.",
+    "Renovate only maintains the build tooling: Node.js builder image and GitHub Actions."
+  ],
+  "packageRules": [
+    {
+      "description": "Node.js builder image of the UI build; stay on the current major (the upstream UI needs it). A change to Containerfile makes upstream-release.yml publish a new patch release after merge",
+      "matchDepNames": [
+        "node"
+      ],
+      "groupName": "Node.js"
+    },
+    {
+      "matchDepNames": [
+        "node"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions: one grouped PR, merged manually (a change to upstream-release.yml triggers a release run after merge)",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Runner images are not updated automatically across majors",
+      "matchDepNames": [
+        "ubuntu"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
+  ],
+  "ignorePaths": [
+    "**/node_modules/**"
+  ]
+}
