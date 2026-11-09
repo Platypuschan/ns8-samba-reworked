@@ -26,13 +26,15 @@
     {
       "description": "Node.js builder image of the UI build; stay on the current major (the upstream UI needs it). A change to Containerfile makes upstream-release.yml publish a new patch release after merge",
       "matchDepNames": [
-        "node"
+        "node",
+        "docker.io/library/node"
       ],
       "groupName": "Node.js"
     },
     {
       "matchDepNames": [
-        "node"
+        "node",
+        "docker.io/library/node"
       ],
       "matchUpdateTypes": [
         "major"
