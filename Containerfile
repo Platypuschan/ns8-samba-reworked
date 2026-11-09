@@ -1,6 +1,6 @@
 ARG UPSTREAM_VERSION
 
-FROM docker.io/library/node:24-slim AS ui-builder
+FROM docker.io/library/node:26-slim AS ui-builder
 
 ARG UPSTREAM_VERSION
 
