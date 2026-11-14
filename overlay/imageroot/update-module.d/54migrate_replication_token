@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Move the ntfy token out of the module environment into a private file.
+# The environment value is removed only after the file reads back. A failure
+# leaves the environment as it was: the monitor reads either place.
+
+import os
+import sys
+
+import agent
+import replication_token
+
+token = os.getenv("NTFY_REPLICATION_TOKEN", "")
+if not token:
+    sys.exit(0)
+
+if not replication_token.read():
+    replication_token.write(token)
+# An existing file is newer than the environment value and wins
+agent.unset_env("NTFY_REPLICATION_TOKEN")
+print("The ntfy replication token now lives in a private file.", file=sys.stderr)

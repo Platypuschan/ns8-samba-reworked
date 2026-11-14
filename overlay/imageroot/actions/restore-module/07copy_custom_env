@@ -6,6 +6,7 @@ import json
 import sys
 
 import agent
+import replication_token
 
 
 environment = json.load(sys.stdin)["environment"]
@@ -16,7 +17,12 @@ for key in (
     "NTFY_REPLICATION_FAILURE_THRESHOLD",
     "NTFY_REPLICATION_BASE_URL",
     "NTFY_REPLICATION_TOPIC",
-    "NTFY_REPLICATION_TOKEN",
 ):
     if key in environment:
         agent.set_env(key, environment[key])
+
+# Backups made before the token moved to a private file carry it in the
+# environment. Newer backups restore the file itself with the module state.
+legacy_token = environment.get("NTFY_REPLICATION_TOKEN", "")
+if legacy_token and not replication_token.read():
+    replication_token.write(legacy_token)

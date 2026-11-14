@@ -76,7 +76,7 @@ run_step() {
         export AGENT_STATE_DIR=${state} AGENT_INSTALL_DIR=${overlay} MODULE_ID=samba1 NODE_ID=1 \
             IT_UPSTREAM_ROOT=${upstream_root} \
             SAMBA_DC_IMAGE=${image} PODMAN_BIN=${repo_root}/integration/bin/podman \
-            PYTHONPATH=${repo_root}/integration/lib \
+            PYTHONPATH=${overlay}/pypkg:${repo_root}/integration/lib \
             PATH=${repo_root}/integration/bin:${PATH}
         printf '%s' "${input}" | timeout --kill-after=10 600 "${step}"
     ) >"${stdout_file}" 2>"${step_log}"
@@ -159,9 +159,12 @@ ntfy_count() { if [[ -f ${out}/ntfy.jsonl ]]; then wc -l < "${out}/ntfy.jsonl"; 
 
 run_monitor() {
     (
+        # The token is a private file in the module state, as in production
+        mkdir -p "${work}/monitor-state"
+        (umask 077; printf 'itest-token\n' > "${work}/monitor-state/ntfy-replication-token")
         export AGENT_STATE_DIR=${work}/monitor-state SERVER_ROLE=dc NTFY_REPLICATION_ENABLED=1 \
             NTFY_REPLICATION_BASE_URL=http://127.0.0.1:18080 NTFY_REPLICATION_TOPIC='samba it' \
-            NTFY_REPLICATION_TOKEN=itest-token NTFY_REPLICATION_FAILURE_THRESHOLD=2 \
+            NTFY_REPLICATION_FAILURE_THRESHOLD=2 PYTHONPATH=${overlay}/pypkg \
             HOSTNAME=dc2.${domain}
         "${overlay}/bin/check-ad-replication"
     ) 2> >(tee -a "${out}/monitor.log" >&2)

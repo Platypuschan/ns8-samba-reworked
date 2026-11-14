@@ -19,6 +19,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTIONS = ROOT / "overlay/imageroot/actions"
+sys.path.insert(0, str(ROOT / "overlay/imageroot/pypkg"))
+os.environ.setdefault("AGENT_STATE_DIR", tempfile.mkdtemp(prefix="samba-test-state-"))
+
+
+import replication_token
 
 
 class RemoteLifecycleTests(unittest.TestCase):
@@ -31,6 +36,7 @@ class RemoteLifecycleTests(unittest.TestCase):
         return output.getvalue()
 
     def test_restore_preserves_remote_join_and_monitor_settings(self):
+        replication_token.clear()
         agent = types.ModuleType("agent")
         agent.set_env = mock.Mock()
         environment = {
@@ -47,7 +53,10 @@ class RemoteLifecycleTests(unittest.TestCase):
             {"environment": environment},
             {"agent": agent},
         )
-        self.assertEqual(dict(call.args for call in agent.set_env.call_args_list), environment)
+        # The token is a private file, not an environment variable
+        expected = {k: v for k, v in environment.items() if k != "NTFY_REPLICATION_TOKEN"}
+        self.assertEqual(dict(call.args for call in agent.set_env.call_args_list), expected)
+        self.assertEqual(replication_token.read(), "secret")
 
     def test_restore_rejects_multiline_backup_before_upstream_copy(self):
         agent = types.ModuleType("agent")
