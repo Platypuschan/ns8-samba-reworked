@@ -11,6 +11,8 @@ import tempfile
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import replication_token
+
 
 STATE_FILE = Path(os.environ["AGENT_STATE_DIR"]) / "ad-replication-monitor-state.json"
 
@@ -52,7 +54,8 @@ def send_ntfy(title, message):
         "Tags": "warning,repeat",
         "User-Agent": "ns8-samba-reworked-replication-monitor/1",
     }
-    token = os.getenv("NTFY_REPLICATION_TOKEN")
+    # The private file; the environment only until the update hook has moved it
+    token = replication_token.read() or os.getenv("NTFY_REPLICATION_TOKEN")
     if token:
         headers["Authorization"] = "Bearer " + token
 

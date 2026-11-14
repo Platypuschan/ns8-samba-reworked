@@ -10,6 +10,7 @@ python3 "${repo_root}/tests/test_overlay.py" "${repo_root}"
 python3 "${repo_root}/tests/test_replication_monitor.py"
 python3 "${repo_root}/tests/test_remote_lifecycle.py"
 python3 "${repo_root}/tests/test_release_scope.py"
+python3 "${repo_root}/tests/test_replication_token.py"
 
 if command -v node >/dev/null 2>&1; then
     node --check "${repo_root}/scripts/patch-ui.mjs"

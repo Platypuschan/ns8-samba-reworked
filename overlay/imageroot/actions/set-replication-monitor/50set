@@ -11,6 +11,7 @@ import sys
 from urllib.parse import urlsplit, urlunsplit
 
 import agent
+import replication_token
 
 
 TOPIC_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -101,9 +102,13 @@ agent.set_env("NTFY_REPLICATION_BASE_URL", base_url)
 agent.set_env("NTFY_REPLICATION_TOPIC", topic)
 
 if token:
-    agent.set_env("NTFY_REPLICATION_TOKEN", token)
-elif request.get("clear_token") and os.getenv("NTFY_REPLICATION_TOKEN"):
-    agent.unset_env("NTFY_REPLICATION_TOKEN")
+    replication_token.write(token)
+    if os.getenv("NTFY_REPLICATION_TOKEN"):
+        agent.unset_env("NTFY_REPLICATION_TOKEN")
+elif request.get("clear_token"):
+    replication_token.clear()
+    if os.getenv("NTFY_REPLICATION_TOKEN"):
+        agent.unset_env("NTFY_REPLICATION_TOKEN")
 
 subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
 if enabled:

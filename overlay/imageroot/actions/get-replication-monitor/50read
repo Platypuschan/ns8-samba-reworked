@@ -6,6 +6,8 @@ import json
 import os
 import sys
 
+import replication_token
+
 
 def as_int(value, default):
     try:
@@ -23,7 +25,7 @@ json.dump(
         "failure_threshold": as_int(
             os.getenv("NTFY_REPLICATION_FAILURE_THRESHOLD"), 3
         ),
-        "token_configured": bool(os.getenv("NTFY_REPLICATION_TOKEN")),
+        "token_configured": bool(replication_token.read() or os.getenv("NTFY_REPLICATION_TOKEN")),
     },
     fp=sys.stdout,
 )

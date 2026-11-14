@@ -15,6 +15,7 @@ from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY / "overlay/imageroot/pypkg"))
 MONITOR_PATH = REPOSITORY / "overlay/imageroot/bin/check-ad-replication"
 
 
